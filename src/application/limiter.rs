@@ -3,6 +3,7 @@
 //! The rate limiter decides whether events should be allowed or suppressed
 //! based on policies and tracks suppression counts.
 
+use crate::application::metrics::Metrics;
 use crate::application::ports::Storage;
 use crate::application::registry::SuppressionRegistry;
 use crate::domain::{
@@ -26,6 +27,7 @@ where
     S: Storage<EventSignature, crate::application::registry::EventState> + Clone,
 {
     registry: SuppressionRegistry<S>,
+    metrics: Metrics,
 }
 
 impl<S> RateLimiter<S>
@@ -36,8 +38,9 @@ where
     ///
     /// # Arguments
     /// * `registry` - The suppression registry (which contains the clock)
-    pub fn new(registry: SuppressionRegistry<S>) -> Self {
-        Self { registry }
+    /// * `metrics` - Optional metrics tracker
+    pub fn new(registry: SuppressionRegistry<S>, metrics: Metrics) -> Self {
+        Self { registry, metrics }
     }
 
     /// Process an event and decide whether to allow or suppress it.
@@ -55,7 +58,7 @@ where
     /// - No allocations in common case
     pub fn check_event(&self, signature: EventSignature) -> LimitDecision {
         // Access or create state for this signature and make a decision
-        self.registry.with_event_state(signature, |state, now| {
+        let decision = self.registry.with_event_state(signature, |state, now| {
             // Ask the policy whether to allow this event
             let decision = state.policy.register_event(now);
 
@@ -67,12 +70,25 @@ where
                     LimitDecision::Suppress
                 }
             }
-        })
+        });
+
+        // Record metrics
+        match decision {
+            LimitDecision::Allow => self.metrics.record_allowed(),
+            LimitDecision::Suppress => self.metrics.record_suppressed(),
+        }
+
+        decision
     }
 
     /// Get a reference to the registry.
     pub fn registry(&self) -> &SuppressionRegistry<S> {
         &self.registry
+    }
+
+    /// Get a reference to the metrics.
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 }
 
@@ -91,7 +107,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(2).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, Metrics::new());
 
         let sig = EventSignature::simple("INFO", "Test message");
 
@@ -112,7 +128,7 @@ mod tests {
         let mock_clock = Arc::new(MockClock::new(Instant::now()));
         let policy = Policy::time_window(2, Duration::from_secs(60)).unwrap();
         let registry = SuppressionRegistry::new(storage, mock_clock.clone(), policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, Metrics::new());
 
         let sig = EventSignature::simple("INFO", "Test");
 
@@ -136,7 +152,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(1).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, Metrics::new());
 
         let sig1 = EventSignature::simple("INFO", "Message 1");
         let sig2 = EventSignature::simple("INFO", "Message 2");
@@ -155,7 +171,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(1).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry.clone());
+        let limiter = RateLimiter::new(registry.clone(), Metrics::new());
 
         let sig = EventSignature::simple("INFO", "Test");
 
@@ -181,7 +197,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(50).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = Arc::new(RateLimiter::new(registry));
+        let limiter = Arc::new(RateLimiter::new(registry, Metrics::new()));
 
         let sig = EventSignature::simple("INFO", "Concurrent test");
         let mut handles = vec![];

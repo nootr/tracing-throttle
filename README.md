@@ -3,11 +3,8 @@
 [![Crates.io](https://img.shields.io/crates/v/tracing-throttle.svg)](https://crates.io/crates/tracing-throttle)
 [![Documentation](https://docs.rs/tracing-throttle/badge.svg)](https://docs.rs/tracing-throttle)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Status](https://img.shields.io/badge/status-MVP--not--production--ready-orange)
 
 High-performance log deduplication and rate limiting for the Rust `tracing` ecosystem.
-
-> **⚠️ Warning:** This is an MVP release (v0.1.0) with remaining issues. Not recommended for production use without adding input validation and observability. See [Production Readiness Status](#️-production-readiness-status) below.
 
 ## Overview
 
@@ -26,6 +23,7 @@ The crate provides a `tracing::Layer` that deduplicates events based on their si
 - 🎯 **Flexible Policies**: Count-based, time-window, exponential backoff, and custom policies
 - 📊 **Per-signature Throttling**: Events with identical signatures are throttled together
 - 💾 **Memory Control**: Optional LRU eviction to prevent unbounded memory growth
+- 📈 **Observability Metrics**: Built-in tracking of allowed, suppressed, and evicted events
 - ⏱️ **Suppression Summaries**: Periodic emission of suppression statistics (coming in v0.2)
 - 🔧 **Easy Integration**: Drop-in `tracing::Layer` compatible with existing subscribers
 
@@ -73,6 +71,49 @@ for i in 0..1000 {
 }
 // Only the first 100 will be emitted
 ```
+
+## Observability & Metrics
+
+Monitor rate limiting behavior with built-in metrics:
+
+```rust
+use tracing_throttle::{TracingRateLimitLayer, Policy};
+
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_policy(Policy::count_based(100).expect("valid policy"))
+    .build()
+    .expect("valid config");
+
+// ... after some log events have been processed ...
+
+// Get current metrics
+let metrics = rate_limit.metrics();
+println!("Events allowed: {}", metrics.events_allowed());
+println!("Events suppressed: {}", metrics.events_suppressed());
+println!("Signatures evicted: {}", metrics.signatures_evicted());
+
+// Or get a snapshot for calculations
+let snapshot = metrics.snapshot();
+println!("Total events: {}", snapshot.total_events());
+println!("Suppression rate: {:.2}%", snapshot.suppression_rate() * 100.0);
+
+// Check how many unique signatures are being tracked
+println!("Tracked signatures: {}", rate_limit.signature_count());
+```
+
+**Available Metrics:**
+- `events_allowed()` - Total events allowed through
+- `events_suppressed()` - Total events suppressed
+- `signatures_evicted()` - Signatures removed due to LRU eviction
+- `signature_count()` - Current number of tracked signatures
+- `suppression_rate()` - Ratio of suppressed to total events (0.0 - 1.0)
+
+**Use Cases:**
+- Monitor suppression rates in production dashboards
+- Alert when suppression rate exceeds threshold
+- Track signature cardinality growth
+- Observe LRU eviction frequency
+- Validate rate limiting effectiveness
 
 ## Rate Limiting Policies
 
@@ -215,12 +256,10 @@ cargo run --example policies
 - Basic registry and rate limiter
 - `tracing::Layer` implementation
 - LRU eviction with configurable memory limits
-- Comprehensive test suite (67 tests)
+- Comprehensive test suite (82 tests)
 - Performance benchmarks (20M ops/sec)
 - Hexagonal architecture (clean ports & adapters)
-
-⚠️ **Known Issues (blocks production):**
-- No observability hooks
+- Observability metrics (events allowed/suppressed, eviction tracking)
 
 ### v0.1.1 (Production Hardening) - NEXT
 **Critical Fixes:**
@@ -229,9 +268,9 @@ cargo run --example policies
 - ✅ Fix atomic memory ordering (Release/Acquire)
 - ✅ Add saturation arithmetic for overflow protection
 - ✅ Add input validation (non-zero limits, durations, and reasonable max_events)
+- ✅ Add observability metrics (signature count, suppression rates)
 
 **Major Improvements:**
-- 📊 Add observability metrics (signature count, suppression rates)
 - 🛡️ Add circuit breaker for fail-safe operation
 - 📚 Document memory implications and limitations
 - ⚙️ Add graceful shutdown for async emitter

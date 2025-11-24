@@ -2,6 +2,7 @@
 //!
 //! Provides concurrent, sharded storage for tracking event suppression state.
 
+use crate::application::metrics::Metrics;
 use crate::application::ports::Storage;
 use dashmap::DashMap;
 use std::hash::Hash;
@@ -80,6 +81,8 @@ where
     max_entries: Option<usize>,
     /// Reference point for tracking timestamps
     epoch: Instant,
+    /// Optional metrics for tracking evictions
+    metrics: Option<Metrics>,
 }
 
 impl<K, V> ShardedStorage<K, V>
@@ -92,6 +95,7 @@ where
             map: DashMap::new(),
             max_entries: None,
             epoch: Instant::now(),
+            metrics: None,
         }
     }
 
@@ -103,7 +107,16 @@ where
             map: DashMap::new(),
             max_entries: Some(max_entries),
             epoch: Instant::now(),
+            metrics: None,
         }
+    }
+
+    /// Set the metrics tracker for this storage.
+    ///
+    /// When metrics are set, eviction events will be recorded.
+    pub fn with_metrics(mut self, metrics: Metrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Evict one entry using approximate LRU.
@@ -131,6 +144,11 @@ where
         // Evict the oldest entry found
         if let Some(key) = oldest_key {
             self.map.remove(&key);
+
+            // Record eviction in metrics if available
+            if let Some(ref metrics) = self.metrics {
+                metrics.record_eviction();
+            }
         }
     }
 
@@ -169,6 +187,7 @@ where
             map: DashMap::new(),
             max_entries: self.max_entries,
             epoch: self.epoch,
+            metrics: self.metrics.clone(),
         };
         for entry in self.map.iter() {
             let key = entry.key().clone();

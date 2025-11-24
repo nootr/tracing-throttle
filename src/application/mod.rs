@@ -13,5 +13,6 @@
 
 pub mod emitter;
 pub mod limiter;
+pub mod metrics;
 pub mod ports;
 pub mod registry;

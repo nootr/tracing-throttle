@@ -2,7 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing_throttle::{
-    EventSignature, Policy, RateLimiter, ShardedStorage, SuppressionRegistry, SystemClock,
+    EventSignature, Metrics, Policy, RateLimiter, ShardedStorage, SuppressionRegistry, SystemClock,
 };
 
 /// Benchmark signature computation speed
@@ -69,7 +69,7 @@ fn bench_single_threaded_throughput(c: &mut Criterion) {
                 let storage = Arc::new(ShardedStorage::new());
                 let clock = Arc::new(SystemClock::new());
                 let registry = SuppressionRegistry::new(storage, clock, policy.clone());
-                let limiter = RateLimiter::new(registry);
+                let limiter = RateLimiter::new(registry, Metrics::new());
                 let sig = EventSignature::simple("INFO", "Test message");
 
                 b.iter(|| {
@@ -100,7 +100,7 @@ fn bench_concurrent_throughput(c: &mut Criterion) {
                     let clock = Arc::new(SystemClock::new());
                     let policy = Policy::count_based(100).unwrap();
                     let registry = SuppressionRegistry::new(storage, clock, policy);
-                    let limiter = Arc::new(RateLimiter::new(registry));
+                    let limiter = Arc::new(RateLimiter::new(registry, Metrics::new()));
 
                     let mut handles = vec![];
                     for i in 0..num_threads {
@@ -137,7 +137,7 @@ fn bench_signature_diversity(c: &mut Criterion) {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, Metrics::new());
         let sig = EventSignature::simple("INFO", "Same message");
 
         b.iter(|| {
@@ -153,7 +153,7 @@ fn bench_signature_diversity(c: &mut Criterion) {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, Metrics::new());
         let sigs: Vec<_> = (0..10)
             .map(|i| EventSignature::simple("INFO", &format!("Message {}", i)))
             .collect();
@@ -172,7 +172,7 @@ fn bench_signature_diversity(c: &mut Criterion) {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, Metrics::new());
         let sigs: Vec<_> = (0..1000)
             .map(|i| EventSignature::simple("INFO", &format!("Message {}", i)))
             .collect();
@@ -202,7 +202,7 @@ fn bench_registry_size(c: &mut Criterion) {
                     let clock = Arc::new(SystemClock::new());
                     let policy = Policy::count_based(100).unwrap();
                     let registry = SuppressionRegistry::new(storage, clock, policy);
-                    let limiter = RateLimiter::new(registry);
+                    let limiter = RateLimiter::new(registry, Metrics::new());
 
                     for i in 0..num_sigs {
                         let sig = EventSignature::simple("INFO", &format!("Message {}", i));

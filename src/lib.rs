@@ -6,14 +6,6 @@
 //! configurable policies. Events are deduplicated by their signature (level, message, and
 //! fields), so identical log events are throttled together.
 //!
-//! # ⚠️ Production Readiness Warning
-//!
-//! **This is an MVP release (v0.1.0) with known issues:**
-//! - No observability metrics
-//!
-//! **Not recommended for production use** without addressing these issues.
-//! See the [README](https://github.com/nootr/tracing-throttle)
-//! for details and the roadmap for fixes.
 //!
 //! ## Quick Start
 //!
@@ -50,6 +42,28 @@
 //! - **Custom policies**: Implement your own rate limiting logic
 //! - **Per-signature throttling**: Different messages are throttled independently
 //! - **LRU eviction**: Optional memory limits with automatic eviction of least recently used signatures
+//! - **Observability metrics**: Built-in tracking of allowed, suppressed, and evicted events
+//!
+//! ## Observability
+//!
+//! Monitor rate limiting behavior with built-in metrics:
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::{TracingRateLimitLayer, Policy};
+//! # let rate_limit = TracingRateLimitLayer::builder()
+//! #     .with_policy(Policy::count_based(100).unwrap())
+//! #     .build()
+//! #     .unwrap();
+//! // Get current metrics
+//! let metrics = rate_limit.metrics();
+//! println!("Events allowed: {}", metrics.events_allowed());
+//! println!("Events suppressed: {}", metrics.events_suppressed());
+//! println!("Signatures evicted: {}", metrics.signatures_evicted());
+//!
+//! // Get snapshot for calculations
+//! let snapshot = metrics.snapshot();
+//! println!("Suppression rate: {:.2}%", snapshot.suppression_rate() * 100.0);
+//! ```
 
 // Domain layer - pure business logic
 pub mod domain;
@@ -73,6 +87,7 @@ pub use domain::{
 pub use application::{
     emitter::EmitterConfigError,
     limiter::RateLimiter,
+    metrics::{Metrics, MetricsSnapshot},
     ports::{Clock, Storage},
     registry::SuppressionRegistry,
 };

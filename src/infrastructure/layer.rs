@@ -6,6 +6,7 @@
 use crate::application::{
     emitter::EmitterConfig,
     limiter::{LimitDecision, RateLimiter},
+    metrics::Metrics,
     ports::{Clock, Storage},
     registry::{EventState, SuppressionRegistry},
 };
@@ -115,14 +116,17 @@ impl TracingRateLimitLayerBuilder {
             }
         }
 
+        // Create shared metrics
+        let metrics = Metrics::new();
+
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
         let storage = if let Some(max) = self.max_signatures {
-            Arc::new(ShardedStorage::with_max_entries(max))
+            Arc::new(ShardedStorage::with_max_entries(max).with_metrics(metrics.clone()))
         } else {
-            Arc::new(ShardedStorage::new())
+            Arc::new(ShardedStorage::new().with_metrics(metrics.clone()))
         };
         let registry = SuppressionRegistry::new(storage, clock, self.policy);
-        let limiter = RateLimiter::new(registry);
+        let limiter = RateLimiter::new(registry, metrics.clone());
 
         // Let EmitterConfig validate the interval
         let emitter_config = EmitterConfig::new(self.summary_interval)?;
@@ -178,6 +182,21 @@ where
     /// Get a reference to the underlying limiter.
     pub fn limiter(&self) -> &RateLimiter<S> {
         &self.limiter
+    }
+
+    /// Get a reference to the metrics.
+    ///
+    /// Returns metrics about rate limiting behavior including:
+    /// - Events allowed
+    /// - Events suppressed
+    /// - Signatures evicted
+    pub fn metrics(&self) -> &Metrics {
+        self.limiter.metrics()
+    }
+
+    /// Get the current number of tracked signatures.
+    pub fn signature_count(&self) -> usize {
+        self.limiter.registry().len()
     }
 }
 
@@ -374,5 +393,104 @@ mod tests {
             .unwrap();
 
         assert!(layer.limiter().registry().is_empty());
+    }
+
+    #[test]
+    fn test_metrics_tracking() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(2).unwrap())
+            .build()
+            .unwrap();
+
+        let sig = EventSignature::simple("INFO", "test");
+
+        // Check initial metrics
+        assert_eq!(layer.metrics().events_allowed(), 0);
+        assert_eq!(layer.metrics().events_suppressed(), 0);
+
+        // Allow first two events
+        assert!(layer.should_allow(sig));
+        assert!(layer.should_allow(sig));
+
+        // Check metrics after allowed events
+        assert_eq!(layer.metrics().events_allowed(), 2);
+        assert_eq!(layer.metrics().events_suppressed(), 0);
+
+        // Suppress third event
+        assert!(!layer.should_allow(sig));
+
+        // Check metrics after suppressed event
+        assert_eq!(layer.metrics().events_allowed(), 2);
+        assert_eq!(layer.metrics().events_suppressed(), 1);
+    }
+
+    #[test]
+    fn test_metrics_snapshot() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(3).unwrap())
+            .build()
+            .unwrap();
+
+        let sig = EventSignature::simple("INFO", "test");
+
+        // Generate some events
+        for _ in 0..5 {
+            layer.should_allow(sig);
+        }
+
+        // Get snapshot
+        let snapshot = layer.metrics().snapshot();
+        assert_eq!(snapshot.events_allowed, 3);
+        assert_eq!(snapshot.events_suppressed, 2);
+        assert_eq!(snapshot.total_events(), 5);
+        assert!((snapshot.suppression_rate() - 0.4).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_signature_count() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(2).unwrap())
+            .build()
+            .unwrap();
+
+        assert_eq!(layer.signature_count(), 0);
+
+        let sig1 = EventSignature::simple("INFO", "test1");
+        let sig2 = EventSignature::simple("INFO", "test2");
+
+        layer.should_allow(sig1);
+        assert_eq!(layer.signature_count(), 1);
+
+        layer.should_allow(sig2);
+        assert_eq!(layer.signature_count(), 2);
+
+        // Same signature shouldn't increase count
+        layer.should_allow(sig1);
+        assert_eq!(layer.signature_count(), 2);
+    }
+
+    #[test]
+    fn test_metrics_with_eviction() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(1).unwrap())
+            .with_max_signatures(3)
+            .build()
+            .unwrap();
+
+        // Fill up to capacity
+        for i in 0..3 {
+            let sig = EventSignature::simple("INFO", &format!("test{}", i));
+            layer.should_allow(sig);
+        }
+
+        assert_eq!(layer.signature_count(), 3);
+        assert_eq!(layer.metrics().signatures_evicted(), 0);
+
+        // Add one more, which should trigger eviction
+        let sig = EventSignature::simple("INFO", "test3");
+        layer.should_allow(sig);
+
+        assert_eq!(layer.signature_count(), 3);
+        assert_eq!(layer.metrics().signatures_evicted(), 1);
     }
 }

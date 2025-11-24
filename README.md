@@ -214,30 +214,32 @@ Different log messages are throttled independently, so important logs aren't sup
 
 ## Memory Management
 
-By default, the layer tracks up to **10,000 unique event signatures**. When this limit is reached, the least recently used signatures are automatically evicted using an approximate LRU algorithm.
+By default, the layer tracks up to **10,000 unique event signatures** with LRU eviction. Each signature uses approximately **150-250 bytes**.
 
-**Customizing the limit:**
+**Typical memory usage:**
+- 10,000 signatures (default): **~1.5-2.5 MB**
+- 50,000 signatures: **~7.5-12.5 MB**
+- 100,000 signatures: **~15-25 MB**
 
 ```rust
-// Increase for high-cardinality applications
+// Increase limit for high-cardinality applications
 let rate_limit = TracingRateLimitLayer::builder()
     .with_max_signatures(50_000)
     .build()
     .expect("valid config");
 
-// Opt out of limits (use with caution - can cause unbounded growth)
-let rate_limit = TracingRateLimitLayer::builder()
-    .with_unlimited_signatures()
-    .build()
-    .expect("valid config");
+// Monitor usage in production
+let sig_count = rate_limit.signature_count();
+let evictions = rate_limit.metrics().signatures_evicted();
 ```
 
-**Memory considerations:**
-- Each signature uses approximately 100-200 bytes (depends on message length and fields)
-- 10k signatures ≈ 1-2 MB memory overhead
-- 50k signatures ≈ 5-10 MB memory overhead
+**⚠️ High-cardinality warning:** Avoid logging fields with unbounded cardinality (UUIDs, timestamps, request IDs) as they will cause rapid memory growth and eviction.
 
-The default limit (10k) provides a good balance between memory usage and functionality for most applications.
+📖 **See [detailed memory documentation](https://docs.rs/tracing-throttle/latest/tracing_throttle/#memory-management) for:**
+- Memory breakdown and overhead calculations
+- Signature cardinality analysis and estimation
+- Configuration guidelines for different use cases
+- Production monitoring and profiling techniques
 
 ## Performance
 
@@ -285,7 +287,7 @@ cargo run --example policies
 - Basic registry and rate limiter
 - `tracing::Layer` implementation
 - LRU eviction with configurable memory limits
-- Comprehensive test suite (100 tests including circuit breaker integration tests)
+- Comprehensive test suite (105 tests: 94 unit + 11 doc)
 - Performance benchmarks (20M ops/sec)
 - Hexagonal architecture (clean ports & adapters)
 - Observability metrics (events allowed/suppressed, eviction tracking)

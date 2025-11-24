@@ -11,6 +11,7 @@
 //! adapters must implement. This keeps the application layer independent
 //! from infrastructure details.
 
+pub mod circuit_breaker;
 pub mod emitter;
 pub mod limiter;
 pub mod metrics;

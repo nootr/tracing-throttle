@@ -43,6 +43,7 @@
 //! - **Per-signature throttling**: Different messages are throttled independently
 //! - **LRU eviction**: Optional memory limits with automatic eviction of least recently used signatures
 //! - **Observability metrics**: Built-in tracking of allowed, suppressed, and evicted events
+//! - **Fail-safe circuit breaker**: Fails open during errors to preserve observability
 //!
 //! ## Observability
 //!
@@ -63,6 +64,23 @@
 //! // Get snapshot for calculations
 //! let snapshot = metrics.snapshot();
 //! println!("Suppression rate: {:.2}%", snapshot.suppression_rate() * 100.0);
+//! ```
+//!
+//! ## Fail-Safe Operation
+//!
+//! The library uses a circuit breaker to fail open during errors, preserving
+//! observability over strict rate limiting:
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::{TracingRateLimitLayer, CircuitState};
+//! # let rate_limit = TracingRateLimitLayer::new();
+//! // Check circuit breaker state
+//! let cb = rate_limit.circuit_breaker();
+//! match cb.state() {
+//!     CircuitState::Closed => println!("Normal operation"),
+//!     CircuitState::Open => println!("Failing open - allowing all events"),
+//!     CircuitState::HalfOpen => println!("Testing recovery"),
+//! }
 //! ```
 
 // Domain layer - pure business logic
@@ -85,6 +103,7 @@ pub use domain::{
 };
 
 pub use application::{
+    circuit_breaker::{CircuitBreaker, CircuitBreakerConfig, CircuitState},
     emitter::EmitterConfigError,
     limiter::RateLimiter,
     metrics::{Metrics, MetricsSnapshot},

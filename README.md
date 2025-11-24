@@ -24,6 +24,7 @@ The crate provides a `tracing::Layer` that deduplicates events based on their si
 - 📊 **Per-signature Throttling**: Events with identical signatures are throttled together
 - 💾 **Memory Control**: Optional LRU eviction to prevent unbounded memory growth
 - 📈 **Observability Metrics**: Built-in tracking of allowed, suppressed, and evicted events
+- 🛡️ **Fail-Safe Circuit Breaker**: Fails open to preserve observability during errors
 - ⏱️ **Suppression Summaries**: Periodic emission of suppression statistics (coming in v0.2)
 - 🔧 **Easy Integration**: Drop-in `tracing::Layer` compatible with existing subscribers
 
@@ -114,6 +115,34 @@ println!("Tracked signatures: {}", rate_limit.signature_count());
 - Track signature cardinality growth
 - Observe LRU eviction frequency
 - Validate rate limiting effectiveness
+
+## Fail-Safe Operation
+
+`tracing-throttle` uses a circuit breaker pattern to prevent cascading failures. If rate limiting operations fail (e.g., panics or internal errors), the library **fails open** to preserve observability:
+
+```rust
+use tracing_throttle::{TracingRateLimitLayer, CircuitState};
+
+let rate_limit = TracingRateLimitLayer::new();
+
+// Check circuit breaker health
+let cb = rate_limit.circuit_breaker();
+match cb.state() {
+    CircuitState::Closed => println!("Rate limiting operating normally"),
+    CircuitState::Open => println!("Circuit open - failing open (allowing all events)"),
+    CircuitState::HalfOpen => println!("Testing recovery"),
+}
+
+println!("Consecutive failures: {}", cb.consecutive_failures());
+```
+
+**Circuit Breaker Behavior:**
+- **Closed**: Normal operation, rate limiting active
+- **Open**: After threshold failures (default: 5), fails open and allows all events
+- **HalfOpen**: After recovery timeout (default: 30s), tests if system has recovered
+- **Fail-Open Strategy**: Preserves observability over strict rate limiting
+
+This ensures your logs remain visible during system instability, preventing silent data loss.
 
 ## Rate Limiting Policies
 
@@ -256,7 +285,7 @@ cargo run --example policies
 - Basic registry and rate limiter
 - `tracing::Layer` implementation
 - LRU eviction with configurable memory limits
-- Comprehensive test suite (82 tests)
+- Comprehensive test suite (100 tests including circuit breaker integration tests)
 - Performance benchmarks (20M ops/sec)
 - Hexagonal architecture (clean ports & adapters)
 - Observability metrics (events allowed/suppressed, eviction tracking)

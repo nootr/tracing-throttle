@@ -4,6 +4,7 @@
 //! to log events.
 
 use crate::application::{
+    circuit_breaker::CircuitBreaker,
     emitter::EmitterConfig,
     limiter::{LimitDecision, RateLimiter},
     metrics::Metrics,
@@ -116,8 +117,9 @@ impl TracingRateLimitLayerBuilder {
             }
         }
 
-        // Create shared metrics
+        // Create shared metrics and circuit breaker
         let metrics = Metrics::new();
+        let circuit_breaker = Arc::new(CircuitBreaker::new());
 
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
         let storage = if let Some(max) = self.max_signatures {
@@ -126,7 +128,7 @@ impl TracingRateLimitLayerBuilder {
             Arc::new(ShardedStorage::new().with_metrics(metrics.clone()))
         };
         let registry = SuppressionRegistry::new(storage, clock, self.policy);
-        let limiter = RateLimiter::new(registry, metrics.clone());
+        let limiter = RateLimiter::new(registry, metrics.clone(), circuit_breaker);
 
         // Let EmitterConfig validate the interval
         let emitter_config = EmitterConfig::new(self.summary_interval)?;
@@ -197,6 +199,15 @@ where
     /// Get the current number of tracked signatures.
     pub fn signature_count(&self) -> usize {
         self.limiter.registry().len()
+    }
+
+    /// Get a reference to the circuit breaker.
+    ///
+    /// Use this to check the circuit breaker state and health:
+    /// - `circuit_breaker().state()` - Current circuit state
+    /// - `circuit_breaker().consecutive_failures()` - Failure count
+    pub fn circuit_breaker(&self) -> &Arc<CircuitBreaker> {
+        self.limiter.circuit_breaker()
     }
 }
 
@@ -492,5 +503,86 @@ mod tests {
 
         assert_eq!(layer.signature_count(), 3);
         assert_eq!(layer.metrics().signatures_evicted(), 1);
+    }
+
+    #[test]
+    fn test_circuit_breaker_observability() {
+        use crate::application::circuit_breaker::CircuitState;
+
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(2).unwrap())
+            .build()
+            .unwrap();
+
+        // Check initial circuit breaker state
+        let cb = layer.circuit_breaker();
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert_eq!(cb.consecutive_failures(), 0);
+
+        // Circuit breaker should remain closed during normal operation
+        let sig = EventSignature::simple("INFO", "test");
+        layer.should_allow(sig);
+        layer.should_allow(sig);
+        layer.should_allow(sig);
+
+        assert_eq!(cb.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_circuit_breaker_fail_open_integration() {
+        use crate::application::circuit_breaker::{
+            CircuitBreaker, CircuitBreakerConfig, CircuitState,
+        };
+        use std::time::Duration;
+
+        // Create a circuit breaker with low threshold for testing
+        let cb_config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_secs(1),
+        };
+        let circuit_breaker = Arc::new(CircuitBreaker::with_config(cb_config));
+
+        // Build layer with custom circuit breaker
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(2).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let metrics = Metrics::new();
+        let limiter = RateLimiter::new(registry, metrics, circuit_breaker.clone());
+
+        let layer = TracingRateLimitLayer {
+            limiter,
+            _emitter_config: crate::application::emitter::EmitterConfig::new(Duration::from_secs(
+                30,
+            ))
+            .unwrap(),
+        };
+
+        let sig = EventSignature::simple("INFO", "test");
+
+        // Normal operation - first 2 events allowed, third suppressed
+        assert!(layer.should_allow(sig));
+        assert!(layer.should_allow(sig));
+        assert!(!layer.should_allow(sig));
+
+        // Circuit should still be closed
+        assert_eq!(circuit_breaker.state(), CircuitState::Closed);
+
+        // Manually trigger circuit breaker failures to test fail-open
+        circuit_breaker.record_failure();
+        circuit_breaker.record_failure();
+
+        // Circuit should now be open
+        assert_eq!(circuit_breaker.state(), CircuitState::Open);
+
+        // With circuit open, rate limiter should fail open (allow all events)
+        // even though we've already hit the rate limit
+        assert!(layer.should_allow(sig));
+        assert!(layer.should_allow(sig));
+        assert!(layer.should_allow(sig));
+
+        // Metrics should show these as allowed (fail-open behavior)
+        let snapshot = layer.metrics().snapshot();
+        assert!(snapshot.events_allowed >= 5); // 2 normal + 3 fail-open
     }
 }

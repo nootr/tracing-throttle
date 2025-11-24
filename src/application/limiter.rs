@@ -3,6 +3,7 @@
 //! The rate limiter decides whether events should be allowed or suppressed
 //! based on policies and tracks suppression counts.
 
+use crate::application::circuit_breaker::CircuitBreaker;
 use crate::application::metrics::Metrics;
 use crate::application::ports::Storage;
 use crate::application::registry::SuppressionRegistry;
@@ -10,6 +11,8 @@ use crate::domain::{
     policy::{PolicyDecision, RateLimitPolicy},
     signature::EventSignature,
 };
+use std::panic;
+use std::sync::Arc;
 
 /// Decision about how to handle an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,7 @@ where
 {
     registry: SuppressionRegistry<S>,
     metrics: Metrics,
+    circuit_breaker: Arc<CircuitBreaker>,
 }
 
 impl<S> RateLimiter<S>
@@ -38,9 +42,18 @@ where
     ///
     /// # Arguments
     /// * `registry` - The suppression registry (which contains the clock)
-    /// * `metrics` - Optional metrics tracker
-    pub fn new(registry: SuppressionRegistry<S>, metrics: Metrics) -> Self {
-        Self { registry, metrics }
+    /// * `metrics` - Metrics tracker
+    /// * `circuit_breaker` - Circuit breaker for fail-safe operation
+    pub fn new(
+        registry: SuppressionRegistry<S>,
+        metrics: Metrics,
+        circuit_breaker: Arc<CircuitBreaker>,
+    ) -> Self {
+        Self {
+            registry,
+            metrics,
+            circuit_breaker,
+        }
     }
 
     /// Process an event and decide whether to allow or suppress it.
@@ -51,26 +64,52 @@ where
     /// # Returns
     /// A `LimitDecision` indicating whether to allow or suppress the event.
     ///
+    /// # Fail-Safe Behavior
+    /// If rate limiting operations fail (circuit breaker open), this method fails open
+    /// and allows all events through to preserve observability.
+    ///
     /// # Performance
     /// This method is designed for the hot path:
     /// - Fast hash lookup in sharded map
     /// - Lock-free atomic operations where possible
     /// - No allocations in common case
     pub fn check_event(&self, signature: EventSignature) -> LimitDecision {
-        // Access or create state for this signature and make a decision
-        let decision = self.registry.with_event_state(signature, |state, now| {
-            // Ask the policy whether to allow this event
-            let decision = state.policy.register_event(now);
+        // Check circuit breaker state
+        if !self.circuit_breaker.allow_request() {
+            // Circuit is open, fail open (allow all events)
+            self.metrics.record_allowed();
+            return LimitDecision::Allow;
+        }
 
-            match decision {
-                PolicyDecision::Allow => LimitDecision::Allow,
-                PolicyDecision::Suppress => {
-                    // Record the suppression
-                    state.counter.record_suppression(now);
-                    LimitDecision::Suppress
+        // Attempt rate limiting operation with panic protection
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            self.registry.with_event_state(signature, |state, now| {
+                // Ask the policy whether to allow this event
+                let decision = state.policy.register_event(now);
+
+                match decision {
+                    PolicyDecision::Allow => LimitDecision::Allow,
+                    PolicyDecision::Suppress => {
+                        // Record the suppression
+                        state.counter.record_suppression(now);
+                        LimitDecision::Suppress
+                    }
                 }
+            })
+        }));
+
+        let decision = match result {
+            Ok(decision) => {
+                // Operation succeeded
+                self.circuit_breaker.record_success();
+                decision
             }
-        });
+            Err(_) => {
+                // Operation panicked, record failure and fail open
+                self.circuit_breaker.record_failure();
+                LimitDecision::Allow
+            }
+        };
 
         // Record metrics
         match decision {
@@ -90,6 +129,11 @@ where
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
+
+    /// Get a reference to the circuit breaker.
+    pub fn circuit_breaker(&self) -> &Arc<CircuitBreaker> {
+        &self.circuit_breaker
+    }
 }
 
 #[cfg(test)]
@@ -107,7 +151,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(2).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry, Metrics::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), Arc::new(CircuitBreaker::new()));
 
         let sig = EventSignature::simple("INFO", "Test message");
 
@@ -128,7 +172,7 @@ mod tests {
         let mock_clock = Arc::new(MockClock::new(Instant::now()));
         let policy = Policy::time_window(2, Duration::from_secs(60)).unwrap();
         let registry = SuppressionRegistry::new(storage, mock_clock.clone(), policy);
-        let limiter = RateLimiter::new(registry, Metrics::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), Arc::new(CircuitBreaker::new()));
 
         let sig = EventSignature::simple("INFO", "Test");
 
@@ -152,7 +196,7 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(1).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry, Metrics::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), Arc::new(CircuitBreaker::new()));
 
         let sig1 = EventSignature::simple("INFO", "Message 1");
         let sig2 = EventSignature::simple("INFO", "Message 2");
@@ -171,7 +215,11 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(1).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = RateLimiter::new(registry.clone(), Metrics::new());
+        let limiter = RateLimiter::new(
+            registry.clone(),
+            Metrics::new(),
+            Arc::new(CircuitBreaker::new()),
+        );
 
         let sig = EventSignature::simple("INFO", "Test");
 
@@ -197,7 +245,11 @@ mod tests {
         let clock = Arc::new(SystemClock::new());
         let policy = Policy::count_based(50).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let limiter = Arc::new(RateLimiter::new(registry, Metrics::new()));
+        let limiter = Arc::new(RateLimiter::new(
+            registry,
+            Metrics::new(),
+            Arc::new(CircuitBreaker::new()),
+        ));
 
         let sig = EventSignature::simple("INFO", "Concurrent test");
         let mut handles = vec![];

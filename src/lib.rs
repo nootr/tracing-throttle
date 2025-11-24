@@ -9,7 +9,6 @@
 //! # ⚠️ Production Readiness Warning
 //!
 //! **This is an MVP release (v0.1.0) with known issues:**
-//! - No input validation
 //! - No observability metrics
 //!
 //! **Not recommended for production use** without addressing these issues.
@@ -25,15 +24,17 @@
 //!
 //! // Uses safe defaults: 100 events, 10k signature limit
 //! let rate_limit = TracingRateLimitLayer::builder()
-//!     .with_policy(Policy::count_based(100))
-//!     .build();
+//!     .with_policy(Policy::count_based(100).unwrap())
+//!     .build()
+//!     .unwrap();
 //!
 //! // Or customize:
 //! let rate_limit = TracingRateLimitLayer::builder()
-//!     .with_policy(Policy::count_based(100))
+//!     .with_policy(Policy::count_based(100).unwrap())
 //!     .with_max_signatures(50_000)  // Custom limit
 //!     .with_summary_interval(Duration::from_secs(30))
-//!     .build();
+//!     .build()
+//!     .unwrap();
 //!
 //! // Apply the rate limit as a filter to your fmt layer
 //! tracing_subscriber::registry()
@@ -62,14 +63,15 @@ pub mod infrastructure;
 // Re-export commonly used types for convenience
 pub use domain::{
     policy::{
-        CountBasedPolicy, ExponentialBackoffPolicy, Policy, PolicyDecision, RateLimitPolicy,
-        TimeWindowPolicy,
+        CountBasedPolicy, ExponentialBackoffPolicy, Policy, PolicyDecision, PolicyError,
+        RateLimitPolicy, TimeWindowPolicy,
     },
     signature::EventSignature,
     summary::{SuppressionCounter, SuppressionSummary},
 };
 
 pub use application::{
+    emitter::EmitterConfigError,
     limiter::RateLimiter,
     ports::{Clock, Storage},
     registry::SuppressionRegistry,
@@ -77,6 +79,6 @@ pub use application::{
 
 pub use infrastructure::{
     clock::SystemClock,
-    layer::{TracingRateLimitLayer, TracingRateLimitLayerBuilder},
+    layer::{BuildError, TracingRateLimitLayer, TracingRateLimitLayerBuilder},
     storage::ShardedStorage,
 };

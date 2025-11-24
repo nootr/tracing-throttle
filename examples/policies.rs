@@ -15,8 +15,9 @@ fn demonstrate_count_based() {
     println!("Allow first 5 events, then suppress all\n");
 
     let layer = TracingRateLimitLayer::builder()
-        .with_policy(Policy::count_based(5))
-        .build();
+        .with_policy(Policy::count_based(5).unwrap())
+        .build()
+        .unwrap();
 
     let subscriber =
         tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(layer));
@@ -33,8 +34,9 @@ fn demonstrate_time_window() {
     println!("Allow 3 events per 100ms window\n");
 
     let layer = TracingRateLimitLayer::builder()
-        .with_policy(Policy::time_window(3, Duration::from_millis(100)))
-        .build();
+        .with_policy(Policy::time_window(3, Duration::from_millis(100)).unwrap())
+        .build()
+        .unwrap();
 
     let subscriber =
         tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(layer));
@@ -64,7 +66,8 @@ fn demonstrate_exponential_backoff() {
 
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::exponential_backoff())
-        .build();
+        .build()
+        .unwrap();
 
     let subscriber =
         tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(layer));

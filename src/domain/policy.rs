@@ -6,6 +6,32 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+/// Error returned when policy validation fails.
+///
+/// This error type represents domain-level validation rules for rate limiting
+/// policies. The domain defines what constitutes a valid policy configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyError {
+    /// Maximum count must be greater than zero
+    ZeroMaxCount,
+    /// Maximum events must be greater than zero
+    ZeroMaxEvents,
+    /// Time window duration must be greater than zero
+    ZeroWindowDuration,
+}
+
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyError::ZeroMaxCount => write!(f, "max_count must be greater than 0"),
+            PolicyError::ZeroMaxEvents => write!(f, "max_events must be greater than 0"),
+            PolicyError::ZeroWindowDuration => write!(f, "window duration must be greater than 0"),
+        }
+    }
+}
+
+impl std::error::Error for PolicyError {}
+
 /// Decision made by a rate limiting policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PolicyDecision {
@@ -44,7 +70,7 @@ pub trait RateLimitPolicy: Send + Sync {
 /// use tracing_throttle::{CountBasedPolicy, RateLimitPolicy};
 /// use std::time::Instant;
 ///
-/// let mut policy = CountBasedPolicy::new(3);
+/// let mut policy = CountBasedPolicy::new(3).unwrap();
 /// let now = Instant::now();
 ///
 /// // First 3 events allowed
@@ -56,7 +82,7 @@ pub trait RateLimitPolicy: Send + Sync {
 /// assert!(policy.register_event(now).is_suppress());
 /// assert!(policy.register_event(now).is_suppress());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CountBasedPolicy {
     max_count: usize,
     current_count: usize,
@@ -66,12 +92,18 @@ impl CountBasedPolicy {
     /// Create a new count-based policy.
     ///
     /// # Arguments
-    /// * `max_count` - Maximum number of events to allow before suppressing
-    pub fn new(max_count: usize) -> Self {
-        Self {
+    /// * `max_count` - Maximum number of events to allow before suppressing (must be > 0)
+    ///
+    /// # Errors
+    /// Returns `PolicyError::ZeroMaxCount` if `max_count` is 0.
+    pub fn new(max_count: usize) -> Result<Self, PolicyError> {
+        if max_count == 0 {
+            return Err(PolicyError::ZeroMaxCount);
+        }
+        Ok(Self {
             max_count,
             current_count: 0,
-        }
+        })
     }
 }
 
@@ -100,7 +132,7 @@ impl RateLimitPolicy for CountBasedPolicy {
 /// use tracing_throttle::{TimeWindowPolicy, RateLimitPolicy};
 /// use std::time::{Duration, Instant};
 ///
-/// let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(60));
+/// let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(60)).unwrap();
 /// let now = Instant::now();
 ///
 /// // First 2 events allowed
@@ -115,7 +147,7 @@ impl RateLimitPolicy for CountBasedPolicy {
 /// assert!(policy.register_event(after_window).is_allow());
 /// assert!(policy.register_event(after_window).is_allow());
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TimeWindowPolicy {
     max_events: usize,
     window_duration: Duration,
@@ -126,14 +158,24 @@ impl TimeWindowPolicy {
     /// Create a new time-window policy.
     ///
     /// # Arguments
-    /// * `max_events` - Maximum events allowed in the window
-    /// * `window_duration` - Length of the sliding time window
-    pub fn new(max_events: usize, window_duration: Duration) -> Self {
-        Self {
+    /// * `max_events` - Maximum events allowed in the window (must be > 0)
+    /// * `window_duration` - Length of the sliding time window (must be > 0)
+    ///
+    /// # Errors
+    /// Returns `PolicyError::ZeroMaxEvents` if `max_events` is 0.
+    /// Returns `PolicyError::ZeroWindowDuration` if `window_duration` is 0.
+    pub fn new(max_events: usize, window_duration: Duration) -> Result<Self, PolicyError> {
+        if max_events == 0 {
+            return Err(PolicyError::ZeroMaxEvents);
+        }
+        if window_duration.is_zero() {
+            return Err(PolicyError::ZeroWindowDuration);
+        }
+        Ok(Self {
             max_events,
             window_duration,
             event_timestamps: VecDeque::new(),
-        }
+        })
     }
 
     /// Remove expired events from the window.
@@ -183,7 +225,7 @@ impl RateLimitPolicy for TimeWindowPolicy {
 /// assert!(policy.register_event(now).is_suppress()); // 3rd - suppressed
 /// assert!(policy.register_event(now).is_allow());  // 4th
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExponentialBackoffPolicy {
     event_count: u64,
     next_allowed: u64,
@@ -236,16 +278,27 @@ pub enum Policy {
 
 impl Policy {
     /// Create a count-based policy.
-    pub fn count_based(max_count: usize) -> Self {
-        Policy::CountBased(CountBasedPolicy::new(max_count))
+    ///
+    /// # Errors
+    /// Returns `PolicyError::ZeroMaxCount` if `max_count` is 0.
+    pub fn count_based(max_count: usize) -> Result<Self, PolicyError> {
+        Ok(Policy::CountBased(CountBasedPolicy::new(max_count)?))
     }
 
     /// Create a time-window policy.
-    pub fn time_window(max_events: usize, window: Duration) -> Self {
-        Policy::TimeWindow(TimeWindowPolicy::new(max_events, window))
+    ///
+    /// # Errors
+    /// Returns `PolicyError::ZeroMaxEvents` if `max_events` is 0.
+    /// Returns `PolicyError::ZeroWindowDuration` if `window` is 0.
+    pub fn time_window(max_events: usize, window: Duration) -> Result<Self, PolicyError> {
+        Ok(Policy::TimeWindow(TimeWindowPolicy::new(
+            max_events, window,
+        )?))
     }
 
     /// Create an exponential backoff policy.
+    ///
+    /// This policy has no configurable parameters and cannot fail.
     pub fn exponential_backoff() -> Self {
         Policy::ExponentialBackoff(ExponentialBackoffPolicy::new())
     }
@@ -287,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_count_based_policy() {
-        let mut policy = CountBasedPolicy::new(3);
+        let mut policy = CountBasedPolicy::new(3).unwrap();
         let now = Instant::now();
 
         assert_eq!(policy.register_event(now), PolicyDecision::Allow);
@@ -302,7 +355,7 @@ mod tests {
 
     #[test]
     fn test_time_window_policy() {
-        let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(1));
+        let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(1)).unwrap();
         let now = Instant::now();
 
         assert_eq!(policy.register_event(now), PolicyDecision::Allow);
@@ -337,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_policy_enum() {
-        let mut policy = Policy::count_based(2);
+        let mut policy = Policy::count_based(2).unwrap();
         let now = Instant::now();
 
         assert!(policy.register_event(now).is_allow());
@@ -348,17 +401,14 @@ mod tests {
     // Edge case tests
     #[test]
     fn test_count_based_policy_zero_limit() {
-        let mut policy = CountBasedPolicy::new(0);
-        let now = Instant::now();
-
-        // All events should be suppressed
-        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
-        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+        // Zero limit should be rejected
+        let result = CountBasedPolicy::new(0);
+        assert_eq!(result, Err(PolicyError::ZeroMaxCount));
     }
 
     #[test]
     fn test_count_based_policy_one_limit() {
-        let mut policy = CountBasedPolicy::new(1);
+        let mut policy = CountBasedPolicy::new(1).unwrap();
         let now = Instant::now();
 
         // Only first event allowed
@@ -369,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_count_based_policy_reset() {
-        let mut policy = CountBasedPolicy::new(2);
+        let mut policy = CountBasedPolicy::new(2).unwrap();
         let now = Instant::now();
 
         // Use up the limit
@@ -386,17 +436,14 @@ mod tests {
 
     #[test]
     fn test_time_window_policy_zero_duration() {
-        let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(0));
-        let now = Instant::now();
-
-        // With zero duration, window immediately expires
-        assert_eq!(policy.register_event(now), PolicyDecision::Allow);
-        assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        // Zero duration should be rejected
+        let result = TimeWindowPolicy::new(2, Duration::from_secs(0));
+        assert_eq!(result, Err(PolicyError::ZeroWindowDuration));
     }
 
     #[test]
     fn test_time_window_policy_rapid_events() {
-        let mut policy = TimeWindowPolicy::new(3, Duration::from_millis(100));
+        let mut policy = TimeWindowPolicy::new(3, Duration::from_millis(100)).unwrap();
         let now = Instant::now();
 
         // Rapid fire events
@@ -422,7 +469,7 @@ mod tests {
 
     #[test]
     fn test_time_window_policy_reset() {
-        let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(60));
+        let mut policy = TimeWindowPolicy::new(2, Duration::from_secs(60)).unwrap();
         let now = Instant::now();
 
         // Use up limit

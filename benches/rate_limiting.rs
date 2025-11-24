@@ -54,9 +54,9 @@ fn bench_single_threaded_throughput(c: &mut Criterion) {
 
     for policy_type in ["count_100", "count_1000", "time_window"].iter() {
         let policy = match *policy_type {
-            "count_100" => Policy::count_based(100),
-            "count_1000" => Policy::count_based(1000),
-            "time_window" => Policy::time_window(100, std::time::Duration::from_secs(60)),
+            "count_100" => Policy::count_based(100).unwrap(),
+            "count_1000" => Policy::count_based(1000).unwrap(),
+            "time_window" => Policy::time_window(100, std::time::Duration::from_secs(60)).unwrap(),
             _ => unreachable!(),
         };
 
@@ -67,9 +67,9 @@ fn bench_single_threaded_throughput(c: &mut Criterion) {
             &policy,
             |b, policy| {
                 let storage = Arc::new(ShardedStorage::new());
-                let registry = SuppressionRegistry::new(storage, policy.clone());
                 let clock = Arc::new(SystemClock::new());
-                let limiter = RateLimiter::new(registry, clock);
+                let registry = SuppressionRegistry::new(storage, clock, policy.clone());
+                let limiter = RateLimiter::new(registry);
                 let sig = EventSignature::simple("INFO", "Test message");
 
                 b.iter(|| {
@@ -97,10 +97,10 @@ fn bench_concurrent_throughput(c: &mut Criterion) {
             |b, &num_threads| {
                 b.iter(|| {
                     let storage = Arc::new(ShardedStorage::new());
-                    let policy = Policy::count_based(100);
-                    let registry = SuppressionRegistry::new(storage, policy);
                     let clock = Arc::new(SystemClock::new());
-                    let limiter = Arc::new(RateLimiter::new(registry, clock));
+                    let policy = Policy::count_based(100).unwrap();
+                    let registry = SuppressionRegistry::new(storage, clock, policy);
+                    let limiter = Arc::new(RateLimiter::new(registry));
 
                     let mut handles = vec![];
                     for i in 0..num_threads {
@@ -134,10 +134,10 @@ fn bench_signature_diversity(c: &mut Criterion) {
     // Single signature (worst case - maximum contention)
     group.bench_function("single_signature", |b| {
         let storage = Arc::new(ShardedStorage::new());
-        let policy = Policy::count_based(100);
-        let registry = SuppressionRegistry::new(storage, policy);
         let clock = Arc::new(SystemClock::new());
-        let limiter = RateLimiter::new(registry, clock);
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let limiter = RateLimiter::new(registry);
         let sig = EventSignature::simple("INFO", "Same message");
 
         b.iter(|| {
@@ -150,10 +150,10 @@ fn bench_signature_diversity(c: &mut Criterion) {
     // 10 unique signatures (moderate diversity)
     group.bench_function("10_signatures", |b| {
         let storage = Arc::new(ShardedStorage::new());
-        let policy = Policy::count_based(100);
-        let registry = SuppressionRegistry::new(storage, policy);
         let clock = Arc::new(SystemClock::new());
-        let limiter = RateLimiter::new(registry, clock);
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let limiter = RateLimiter::new(registry);
         let sigs: Vec<_> = (0..10)
             .map(|i| EventSignature::simple("INFO", &format!("Message {}", i)))
             .collect();
@@ -169,10 +169,10 @@ fn bench_signature_diversity(c: &mut Criterion) {
     // 1000 unique signatures (maximum diversity - best case)
     group.bench_function("1000_signatures", |b| {
         let storage = Arc::new(ShardedStorage::new());
-        let policy = Policy::count_based(100);
-        let registry = SuppressionRegistry::new(storage, policy);
         let clock = Arc::new(SystemClock::new());
-        let limiter = RateLimiter::new(registry, clock);
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let limiter = RateLimiter::new(registry);
         let sigs: Vec<_> = (0..1000)
             .map(|i| EventSignature::simple("INFO", &format!("Message {}", i)))
             .collect();
@@ -199,10 +199,10 @@ fn bench_registry_size(c: &mut Criterion) {
             |b, &num_sigs| {
                 b.iter(|| {
                     let storage = Arc::new(ShardedStorage::new());
-                    let policy = Policy::count_based(100);
-                    let registry = SuppressionRegistry::new(storage, policy);
                     let clock = Arc::new(SystemClock::new());
-                    let limiter = RateLimiter::new(registry, clock);
+                    let policy = Policy::count_based(100).unwrap();
+                    let registry = SuppressionRegistry::new(storage, clock, policy);
+                    let limiter = RateLimiter::new(registry);
 
                     for i in 0..num_sigs {
                         let sig = EventSignature::simple("INFO", &format!("Message {}", i));

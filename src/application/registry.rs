@@ -130,7 +130,7 @@ mod tests {
     fn test_registry_creation() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
 
         assert_eq!(registry.len(), 0);
@@ -141,7 +141,7 @@ mod tests {
     fn test_with_event_state() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let sig = EventSignature::simple("INFO", "Test message");
 
@@ -165,7 +165,7 @@ mod tests {
     fn test_clear() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
 
         for i in 0..10 {
@@ -189,7 +189,7 @@ mod tests {
 
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = Arc::new(SuppressionRegistry::new(storage, clock, policy));
         let mut handles = vec![];
 

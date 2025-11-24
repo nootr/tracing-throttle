@@ -20,6 +20,36 @@ use tracing::{Metadata, Subscriber};
 use tracing_subscriber::layer::Filter;
 use tracing_subscriber::{layer::Context, Layer};
 
+/// Error returned when building a TracingRateLimitLayer fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BuildError {
+    /// Maximum signatures must be greater than zero
+    ZeroMaxSignatures,
+    /// Emitter configuration validation failed
+    EmitterConfig(crate::application::emitter::EmitterConfigError),
+}
+
+impl std::fmt::Display for BuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildError::ZeroMaxSignatures => {
+                write!(f, "max_signatures must be greater than 0")
+            }
+            BuildError::EmitterConfig(e) => {
+                write!(f, "emitter configuration error: {}", e)
+            }
+        }
+    }
+}
+
+impl std::error::Error for BuildError {}
+
+impl From<crate::application::emitter::EmitterConfigError> for BuildError {
+    fn from(e: crate::application::emitter::EmitterConfigError) -> Self {
+        BuildError::EmitterConfig(e)
+    }
+}
+
 /// Builder for constructing a `TracingRateLimitLayer`.
 #[derive(Debug)]
 pub struct TracingRateLimitLayerBuilder {
@@ -37,6 +67,8 @@ impl TracingRateLimitLayerBuilder {
     }
 
     /// Set the summary emission interval.
+    ///
+    /// The interval will be validated when `build()` is called.
     pub fn with_summary_interval(mut self, interval: Duration) -> Self {
         self.summary_interval = interval;
         self
@@ -54,6 +86,8 @@ impl TracingRateLimitLayerBuilder {
     /// This prevents unbounded memory growth in applications with high signature cardinality.
     ///
     /// Default: 10,000 signatures
+    ///
+    /// The value will be validated when `build()` is called.
     pub fn with_max_signatures(mut self, max_signatures: usize) -> Self {
         self.max_signatures = Some(max_signatures);
         self
@@ -70,7 +104,17 @@ impl TracingRateLimitLayerBuilder {
     }
 
     /// Build the layer.
-    pub fn build(self) -> TracingRateLimitLayer {
+    ///
+    /// # Errors
+    /// Returns `BuildError` if the configuration is invalid.
+    pub fn build(self) -> Result<TracingRateLimitLayer, BuildError> {
+        // Validate max_signatures if set
+        if let Some(max) = self.max_signatures {
+            if max == 0 {
+                return Err(BuildError::ZeroMaxSignatures);
+            }
+        }
+
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
         let storage = if let Some(max) = self.max_signatures {
             Arc::new(ShardedStorage::with_max_entries(max))
@@ -80,10 +124,13 @@ impl TracingRateLimitLayerBuilder {
         let registry = SuppressionRegistry::new(storage, clock, self.policy);
         let limiter = RateLimiter::new(registry);
 
-        TracingRateLimitLayer {
+        // Let EmitterConfig validate the interval
+        let emitter_config = EmitterConfig::new(self.summary_interval)?;
+
+        Ok(TracingRateLimitLayer {
             limiter,
-            _emitter_config: EmitterConfig::new(self.summary_interval),
-        }
+            _emitter_config: emitter_config,
+        })
     }
 }
 
@@ -143,7 +190,8 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
     /// - Summary interval: 30 seconds
     pub fn builder() -> TracingRateLimitLayerBuilder {
         TracingRateLimitLayerBuilder {
-            policy: Policy::count_based(100),
+            // Safe unwrap: 100 > 0 is always valid
+            policy: Policy::count_based(100).expect("default policy with 100 > 0 is always valid"),
             summary_interval: Duration::from_secs(30),
             clock: None,
             max_signatures: Some(10_000),
@@ -152,14 +200,19 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
 
     /// Create a layer with default settings.
     ///
-    /// Equivalent to `TracingRateLimitLayer::builder().build()`.
+    /// Equivalent to `TracingRateLimitLayer::builder().build().unwrap()`.
     ///
     /// Defaults:
     /// - Policy: count-based (100 events)
     /// - Max signatures: 10,000 (with LRU eviction)
     /// - Summary interval: 30 seconds
+    ///
+    /// # Panics
+    /// This method cannot panic because all default values are valid.
     pub fn new() -> Self {
-        Self::builder().build()
+        Self::builder()
+            .build()
+            .expect("default configuration is always valid")
     }
 }
 
@@ -200,9 +253,10 @@ mod tests {
     #[test]
     fn test_layer_builder() {
         let layer = TracingRateLimitLayer::builder()
-            .with_policy(Policy::count_based(50))
+            .with_policy(Policy::count_based(50).unwrap())
             .with_summary_interval(Duration::from_secs(60))
-            .build();
+            .build()
+            .unwrap();
 
         assert!(layer.limiter().registry().is_empty());
     }
@@ -228,8 +282,9 @@ mod tests {
     #[test]
     fn test_basic_rate_limiting() {
         let layer = TracingRateLimitLayer::builder()
-            .with_policy(Policy::count_based(2))
-            .build();
+            .with_policy(Policy::count_based(2).unwrap())
+            .build()
+            .unwrap();
 
         let sig = EventSignature::simple("INFO", "test_message");
 
@@ -244,8 +299,9 @@ mod tests {
     #[test]
     fn test_layer_integration() {
         let layer = TracingRateLimitLayer::builder()
-            .with_policy(Policy::count_based(3))
-            .build();
+            .with_policy(Policy::count_based(3).unwrap())
+            .build()
+            .unwrap();
 
         // Clone for use in subscriber, keep original for checking state
         let layer_for_check = layer.clone();
@@ -270,8 +326,9 @@ mod tests {
     #[test]
     fn test_layer_suppression_logic() {
         let layer = TracingRateLimitLayer::builder()
-            .with_policy(Policy::count_based(3))
-            .build();
+            .with_policy(Policy::count_based(3).unwrap())
+            .build()
+            .unwrap();
 
         let sig = EventSignature::simple("INFO", "test");
 
@@ -284,5 +341,38 @@ mod tests {
         }
 
         assert_eq!(allowed_count, 3);
+    }
+
+    #[test]
+    fn test_builder_zero_summary_interval() {
+        let result = TracingRateLimitLayer::builder()
+            .with_summary_interval(Duration::from_secs(0))
+            .build();
+
+        assert!(matches!(
+            result,
+            Err(BuildError::EmitterConfig(
+                crate::application::emitter::EmitterConfigError::ZeroSummaryInterval
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_builder_zero_max_signatures() {
+        let result = TracingRateLimitLayer::builder()
+            .with_max_signatures(0)
+            .build();
+
+        assert!(matches!(result, Err(BuildError::ZeroMaxSignatures)));
+    }
+
+    #[test]
+    fn test_builder_valid_max_signatures() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_max_signatures(100)
+            .build()
+            .unwrap();
+
+        assert!(layer.limiter().registry().is_empty());
     }
 }

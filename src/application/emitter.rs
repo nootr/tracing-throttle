@@ -13,6 +13,25 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 use tokio::time::interval;
 
+/// Error returned when emitter configuration validation fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmitterConfigError {
+    /// Summary interval duration must be greater than zero
+    ZeroSummaryInterval,
+}
+
+impl std::fmt::Display for EmitterConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmitterConfigError::ZeroSummaryInterval => {
+                write!(f, "summary interval must be greater than 0")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EmitterConfigError {}
+
 /// Configuration for summary emission.
 #[derive(Debug, Clone)]
 pub struct EmitterConfig {
@@ -33,11 +52,17 @@ impl Default for EmitterConfig {
 
 impl EmitterConfig {
     /// Create a new emitter config with the specified interval.
-    pub fn new(interval: Duration) -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns `EmitterConfigError::ZeroSummaryInterval` if `interval` is zero.
+    pub fn new(interval: Duration) -> Result<Self, EmitterConfigError> {
+        if interval.is_zero() {
+            return Err(EmitterConfigError::ZeroSummaryInterval);
+        }
+        Ok(Self {
             interval,
             min_count: 1,
-        }
+        })
     }
 
     /// Set the minimum suppression count threshold.
@@ -131,7 +156,7 @@ mod tests {
     fn test_collect_summaries_empty() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let config = EmitterConfig::default();
         let emitter = SummaryEmitter::new(registry, config);
@@ -144,7 +169,7 @@ mod tests {
     fn test_collect_summaries_with_suppressions() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let config = EmitterConfig::default();
 
@@ -175,7 +200,7 @@ mod tests {
     fn test_min_count_filtering() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let config = EmitterConfig::default().with_min_count(10);
 
@@ -210,9 +235,9 @@ mod tests {
 
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(100);
+        let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
-        let config = EmitterConfig::new(Duration::from_millis(100));
+        let config = EmitterConfig::new(Duration::from_millis(100)).unwrap();
 
         // Add a suppressed event
         let sig = EventSignature::simple("INFO", "Test");
@@ -238,5 +263,21 @@ mod tests {
         // Should have emitted at least once
         let emission_count = emissions.lock().unwrap().len();
         assert!(emission_count >= 2);
+    }
+
+    #[test]
+    fn test_emitter_config_zero_interval() {
+        let result = EmitterConfig::new(Duration::from_secs(0));
+        assert!(matches!(
+            result,
+            Err(EmitterConfigError::ZeroSummaryInterval)
+        ));
+    }
+
+    #[test]
+    fn test_emitter_config_valid_interval() {
+        let config = EmitterConfig::new(Duration::from_secs(30)).unwrap();
+        assert_eq!(config.interval, Duration::from_secs(30));
+        assert_eq!(config.min_count, 1);
     }
 }

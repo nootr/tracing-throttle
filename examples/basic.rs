@@ -11,8 +11,9 @@ fn main() {
     // Create a rate limit layer with a count-based policy
     // Default: max 10,000 signatures with LRU eviction
     let rate_limit_layer = TracingRateLimitLayer::builder()
-        .with_policy(Policy::count_based(3))
-        .build();
+        .with_policy(Policy::count_based(3).unwrap())
+        .build()
+        .unwrap();
 
     // Set up the tracing subscriber with the rate limit layer as a filter
     tracing_subscriber::registry()

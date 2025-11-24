@@ -89,7 +89,7 @@ mod tests {
     fn test_rate_limiter_basic() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(2);
+        let policy = Policy::count_based(2).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let limiter = RateLimiter::new(registry);
 
@@ -110,7 +110,7 @@ mod tests {
 
         let storage = Arc::new(ShardedStorage::new());
         let mock_clock = Arc::new(MockClock::new(Instant::now()));
-        let policy = Policy::time_window(2, Duration::from_secs(60));
+        let policy = Policy::time_window(2, Duration::from_secs(60)).unwrap();
         let registry = SuppressionRegistry::new(storage, mock_clock.clone(), policy);
         let limiter = RateLimiter::new(registry);
 
@@ -134,7 +134,7 @@ mod tests {
     fn test_rate_limiter_different_signatures() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(1);
+        let policy = Policy::count_based(1).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let limiter = RateLimiter::new(registry);
 
@@ -153,7 +153,7 @@ mod tests {
     fn test_rate_limiter_suppression_counting() {
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(1);
+        let policy = Policy::count_based(1).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let limiter = RateLimiter::new(registry.clone());
 
@@ -179,7 +179,7 @@ mod tests {
 
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
-        let policy = Policy::count_based(50);
+        let policy = Policy::count_based(50).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let limiter = Arc::new(RateLimiter::new(registry));
 

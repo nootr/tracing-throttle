@@ -50,15 +50,17 @@ use std::time::Duration;
 // Create a rate limit filter with safe defaults
 // Defaults: 100 events per signature, 10k max signatures with LRU eviction
 let rate_limit = TracingRateLimitLayer::builder()
-    .with_policy(Policy::count_based(100))
-    .build();
+    .with_policy(Policy::count_based(100).expect("valid policy"))
+    .build()
+    .expect("valid config");
 
 // Or customize the limits:
 let rate_limit = TracingRateLimitLayer::builder()
-    .with_policy(Policy::count_based(100))
+    .with_policy(Policy::count_based(100).expect("valid policy"))
     .with_max_signatures(50_000)  // Custom signature limit
     .with_summary_interval(Duration::from_secs(30))
-    .build();
+    .build()
+    .expect("valid config");
 
 // Add it as a filter to your fmt layer
 tracing_subscriber::registry()
@@ -81,7 +83,7 @@ Allow N events, then suppress all subsequent occurrences:
 ```rust
 use tracing_throttle::Policy;
 
-let policy = Policy::count_based(50);
+let policy = Policy::count_based(50).expect("max_count must be > 0");
 // Allows first 50 events, suppresses the rest
 ```
 
@@ -93,7 +95,8 @@ Allow K events within a sliding time window:
 use std::time::Duration;
 use tracing_throttle::Policy;
 
-let policy = Policy::time_window(10, Duration::from_secs(60));
+let policy = Policy::time_window(10, Duration::from_secs(60))
+    .expect("max_events and window must be > 0");
 // Allows 10 events per minute
 ```
 
@@ -149,12 +152,14 @@ By default, the layer tracks up to **10,000 unique event signatures**. When this
 // Increase for high-cardinality applications
 let rate_limit = TracingRateLimitLayer::builder()
     .with_max_signatures(50_000)
-    .build();
+    .build()
+    .expect("valid config");
 
 // Opt out of limits (use with caution - can cause unbounded growth)
 let rate_limit = TracingRateLimitLayer::builder()
     .with_unlimited_signatures()
-    .build();
+    .build()
+    .expect("valid config");
 ```
 
 **Memory considerations:**
@@ -215,7 +220,6 @@ cargo run --example policies
 - Hexagonal architecture (clean ports & adapters)
 
 ⚠️ **Known Issues (blocks production):**
-- No input validation
 - No observability hooks
 
 ### v0.1.1 (Production Hardening) - NEXT
@@ -224,7 +228,7 @@ cargo run --example policies
 - ✅ Fix OnceLock timestamp bug (shared base instant)
 - ✅ Fix atomic memory ordering (Release/Acquire)
 - ✅ Add saturation arithmetic for overflow protection
-- 🔧 Add input validation (non-zero limits, reasonable max_events)
+- ✅ Add input validation (non-zero limits, durations, and reasonable max_events)
 
 **Major Improvements:**
 - 📊 Add observability metrics (signature count, suppression rates)

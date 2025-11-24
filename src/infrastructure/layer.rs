@@ -26,6 +26,7 @@ pub struct TracingRateLimitLayerBuilder {
     policy: Policy,
     summary_interval: Duration,
     clock: Option<Arc<dyn Clock>>,
+    max_signatures: Option<usize>,
 }
 
 impl TracingRateLimitLayerBuilder {
@@ -47,10 +48,35 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
+    /// Set the maximum number of unique event signatures to track.
+    ///
+    /// When this limit is reached, the least recently used signatures will be evicted.
+    /// This prevents unbounded memory growth in applications with high signature cardinality.
+    ///
+    /// Default: 10,000 signatures
+    pub fn with_max_signatures(mut self, max_signatures: usize) -> Self {
+        self.max_signatures = Some(max_signatures);
+        self
+    }
+
+    /// Disable the signature limit, allowing unbounded growth.
+    ///
+    /// **Warning**: This can lead to unbounded memory usage in applications that generate
+    /// many unique event signatures. Only use this if you're certain your application has
+    /// bounded signature cardinality or you have external memory monitoring.
+    pub fn with_unlimited_signatures(mut self) -> Self {
+        self.max_signatures = None;
+        self
+    }
+
     /// Build the layer.
     pub fn build(self) -> TracingRateLimitLayer {
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
-        let storage = Arc::new(ShardedStorage::new());
+        let storage = if let Some(max) = self.max_signatures {
+            Arc::new(ShardedStorage::with_max_entries(max))
+        } else {
+            Arc::new(ShardedStorage::new())
+        };
         let registry = SuppressionRegistry::new(storage, clock, self.policy);
         let limiter = RateLimiter::new(registry);
 
@@ -110,15 +136,28 @@ where
 
 impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
     /// Create a builder for configuring the layer.
+    ///
+    /// Defaults:
+    /// - Policy: count-based (100 events)
+    /// - Max signatures: 10,000 (with LRU eviction)
+    /// - Summary interval: 30 seconds
     pub fn builder() -> TracingRateLimitLayerBuilder {
         TracingRateLimitLayerBuilder {
             policy: Policy::count_based(100),
             summary_interval: Duration::from_secs(30),
             clock: None,
+            max_signatures: Some(10_000),
         }
     }
 
-    /// Create a layer with default settings (count-based policy, 100 events).
+    /// Create a layer with default settings.
+    ///
+    /// Equivalent to `TracingRateLimitLayer::builder().build()`.
+    ///
+    /// Defaults:
+    /// - Policy: count-based (100 events)
+    /// - Max signatures: 10,000 (with LRU eviction)
+    /// - Summary interval: 30 seconds
     pub fn new() -> Self {
         Self::builder().build()
     }

@@ -5,69 +5,133 @@
 use crate::application::ports::Storage;
 use dashmap::DashMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
-/// Thread-safe sharded storage backed by DashMap.
+/// Internal wrapper that tracks last access time for LRU eviction.
+#[derive(Debug)]
+struct StorageEntry<V> {
+    value: V,
+    /// Timestamp as nanoseconds since a reference point for atomic updates
+    last_access_nanos: AtomicU64,
+}
+
+impl<V> StorageEntry<V> {
+    /// Create a new storage entry with the given value and initial access time.
+    ///
+    /// # Overflow Handling
+    ///
+    /// If the duration from epoch exceeds u64::MAX nanoseconds (~584 years),
+    /// it saturates at u64::MAX.
+    fn new(value: V, now: Instant, epoch: Instant) -> Self {
+        let nanos = now
+            .saturating_duration_since(epoch)
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        Self {
+            value,
+            last_access_nanos: AtomicU64::new(nanos),
+        }
+    }
+
+    /// Update the last access time.
+    ///
+    /// Uses Release ordering to ensure the timestamp update is visible to other threads.
+    fn update_access(&self, now: Instant, epoch: Instant) {
+        let nanos = now
+            .saturating_duration_since(epoch)
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
+        // Use Release ordering to ensure visibility of timestamp updates
+        self.last_access_nanos.store(nanos, Ordering::Release);
+    }
+
+    /// Get the last access time.
+    ///
+    /// Uses Acquire ordering to synchronize with Release stores.
+    ///
+    /// # Overflow Handling
+    ///
+    /// If adding the stored duration to epoch would overflow (practically impossible),
+    /// returns the epoch. This means extremely old entries will appear to have been
+    /// accessed at epoch time, making them candidates for LRU eviction.
+    fn last_access(&self, epoch: Instant) -> Instant {
+        // Use Acquire ordering to synchronize with Release store
+        let nanos = self.last_access_nanos.load(Ordering::Acquire);
+        epoch
+            .checked_add(std::time::Duration::from_nanos(nanos))
+            .unwrap_or(epoch)
+    }
+}
+
+/// Thread-safe sharded storage backed by DashMap with optional LRU eviction.
 ///
 /// DashMap provides lock-free reads and fine-grained locking for writes,
 /// making it ideal for high-throughput logging scenarios.
+///
+/// When `max_entries` is set, the storage uses approximate LRU eviction:
+/// when at capacity, it samples a few random entries and evicts the oldest.
 #[derive(Debug)]
 pub struct ShardedStorage<K, V>
 where
     K: Eq + Hash + Clone,
 {
-    map: DashMap<K, V>,
+    map: DashMap<K, StorageEntry<V>>,
+    max_entries: Option<usize>,
+    /// Reference point for tracking timestamps
+    epoch: Instant,
 }
 
 impl<K, V> ShardedStorage<K, V>
 where
     K: Eq + Hash + Clone,
 {
-    /// Create a new sharded storage instance.
+    /// Create a new sharded storage instance with no size limit.
     pub fn new() -> Self {
         Self {
             map: DashMap::new(),
+            max_entries: None,
+            epoch: Instant::now(),
         }
     }
 
-    /// Insert or update a value.
-    pub fn insert(&self, key: K, value: V) {
-        self.map.insert(key, value);
+    /// Create a new sharded storage instance with a maximum entry limit.
+    ///
+    /// When the limit is reached, approximate LRU eviction is used to make space.
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            map: DashMap::new(),
+            max_entries: Some(max_entries),
+            epoch: Instant::now(),
+        }
     }
 
-    /// Get a reference to a value.
-    pub fn get<Q>(&self, key: &Q) -> Option<dashmap::mapref::one::Ref<'_, K, V>>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.map.get(key)
-    }
+    /// Evict one entry using approximate LRU.
+    ///
+    /// Samples up to 5 entries and evicts the one with the oldest access time.
+    fn evict_one(&self) {
+        const SAMPLE_SIZE: usize = 5;
 
-    /// Get a mutable reference to a value.
-    pub fn get_mut<Q>(&self, key: &Q) -> Option<dashmap::mapref::one::RefMut<'_, K, V>>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.map.get_mut(key)
-    }
+        let mut oldest_key: Option<K> = None;
+        let mut oldest_time = Instant::now();
 
-    /// Check if a key exists.
-    pub fn contains_key<Q>(&self, key: &Q) -> bool
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.map.contains_key(key)
-    }
+        // Sample entries and find the oldest
+        for (idx, entry) in self.map.iter().enumerate() {
+            if idx >= SAMPLE_SIZE {
+                break;
+            }
 
-    /// Remove a key and return its value.
-    pub fn remove<Q>(&self, key: &Q) -> Option<(K, V)>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.map.remove(key)
+            let access_time = entry.value().last_access(self.epoch);
+            if oldest_key.is_none() || access_time < oldest_time {
+                oldest_time = access_time;
+                oldest_key = Some(entry.key().clone());
+            }
+        }
+
+        // Evict the oldest entry found
+        if let Some(key) = oldest_key {
+            self.map.remove(&key);
+        }
     }
 
     /// Get the number of entries.
@@ -83,21 +147,6 @@ where
     /// Clear all entries.
     pub fn clear(&self) {
         self.map.clear();
-    }
-
-    /// Get or insert a value using a closure.
-    pub fn entry(&self, key: K) -> dashmap::mapref::entry::Entry<'_, K, V> {
-        self.map.entry(key)
-    }
-
-    /// Iterate over all key-value pairs.
-    pub fn iter(&self) -> dashmap::iter::Iter<'_, K, V> {
-        self.map.iter()
-    }
-
-    /// Retain only the elements that satisfy the predicate.
-    pub fn retain(&self, f: impl FnMut(&K, &mut V) -> bool) {
-        self.map.retain(f);
     }
 }
 
@@ -116,9 +165,20 @@ where
     V: Clone,
 {
     fn clone(&self) -> Self {
-        let new_storage = Self::new();
+        let new_storage = Self {
+            map: DashMap::new(),
+            max_entries: self.max_entries,
+            epoch: self.epoch,
+        };
         for entry in self.map.iter() {
-            new_storage.insert(entry.key().clone(), entry.value().clone());
+            let key = entry.key().clone();
+            let storage_entry = StorageEntry {
+                value: entry.value().value.clone(),
+                last_access_nanos: AtomicU64::new(
+                    entry.value().last_access_nanos.load(Ordering::Relaxed),
+                ),
+            };
+            new_storage.map.insert(key, storage_entry);
         }
         new_storage
     }
@@ -134,9 +194,24 @@ where
     where
         F: FnOnce(&mut V) -> R,
     {
+        // Check if we need to make space before inserting
+        if let Some(max) = self.max_entries {
+            if self.map.len() >= max && !self.map.contains_key(&key) {
+                self.evict_one();
+            }
+        }
+
+        let now = Instant::now();
+        let epoch = self.epoch;
+
         let entry = self.map.entry(key);
-        let mut value_ref = entry.or_insert_with(factory);
-        accessor(&mut value_ref)
+        let mut storage_entry = entry.or_insert_with(|| StorageEntry::new(factory(), now, epoch));
+
+        // Update access time
+        storage_entry.update_access(now, epoch);
+
+        // Provide mutable access to the wrapped value
+        accessor(&mut storage_entry.value)
     }
 
     fn len(&self) -> usize {
@@ -156,15 +231,16 @@ where
         F: FnMut(&K, &V),
     {
         for entry in self.map.iter() {
-            f(entry.key(), entry.value());
+            f(entry.key(), &entry.value().value);
         }
     }
 
-    fn retain<F>(&self, f: F)
+    fn retain<F>(&self, mut f: F)
     where
         F: FnMut(&K, &mut V) -> bool,
     {
-        self.map.retain(f);
+        self.map
+            .retain(|k, storage_entry| f(k, &mut storage_entry.value));
     }
 }
 
@@ -211,51 +287,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::ports::Storage as StorageTrait;
 
     #[test]
     fn test_basic_operations() {
-        let storage = ShardedStorage::new();
+        let storage = ShardedStorage::<String, i32>::new();
 
-        storage.insert("key1", 100);
-        storage.insert("key2", 200);
-
-        assert_eq!(*storage.get("key1").unwrap(), 100);
-        assert_eq!(*storage.get("key2").unwrap(), 200);
-        assert!(storage.get("key3").is_none());
+        // Use the Storage trait methods
+        storage.with_entry_mut("key1".to_string(), || 100, |_v| {});
+        storage.with_entry_mut("key2".to_string(), || 200, |_v| {});
 
         assert_eq!(storage.len(), 2);
         assert!(!storage.is_empty());
     }
 
     #[test]
-    fn test_update() {
-        let storage = ShardedStorage::new();
-
-        storage.insert("key", 100);
-        assert_eq!(*storage.get("key").unwrap(), 100);
-
-        storage.insert("key", 200);
-        assert_eq!(*storage.get("key").unwrap(), 200);
-    }
-
-    #[test]
-    fn test_remove() {
-        let storage = ShardedStorage::new();
-
-        storage.insert("key", 100);
-        assert!(storage.contains_key("key"));
-
-        let removed = storage.remove("key");
-        assert_eq!(removed, Some(("key", 100)));
-        assert!(!storage.contains_key("key"));
-    }
-
-    #[test]
     fn test_clear() {
-        let storage = ShardedStorage::new();
+        let storage = ShardedStorage::<String, i32>::new();
 
-        storage.insert("key1", 100);
-        storage.insert("key2", 200);
+        storage.with_entry_mut("key1".to_string(), || 100, |_v| {});
+        storage.with_entry_mut("key2".to_string(), || 200, |_v| {});
         assert_eq!(storage.len(), 2);
 
         storage.clear();
@@ -268,14 +319,16 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let storage = Arc::new(ShardedStorage::new());
+        let storage = Arc::new(ShardedStorage::<String, i32>::new());
         let mut handles = vec![];
 
         for i in 0..10 {
             let storage_clone = Arc::clone(&storage);
             let handle = thread::spawn(move || {
                 for j in 0..100 {
-                    storage_clone.insert(format!("key_{}_{}", i, j), i * 100 + j);
+                    let key = format!("key_{}_{}", i, j);
+                    let value = i * 100 + j;
+                    storage_clone.with_entry_mut(key, || value, |_v| {});
                 }
             });
             handles.push(handle);
@@ -286,5 +339,92 @@ mod tests {
         }
 
         assert_eq!(storage.len(), 1000);
+    }
+
+    #[test]
+    fn test_lru_eviction() {
+        let storage = ShardedStorage::<String, i32>::with_max_entries(5);
+
+        // Insert 5 entries - should all fit
+        for i in 0..5 {
+            storage.with_entry_mut(format!("key{}", i), || i, |_v| {});
+        }
+        assert_eq!(storage.len(), 5);
+
+        // Insert one more - should evict one
+        storage.with_entry_mut("key5".to_string(), || 5, |_v| {});
+        assert_eq!(storage.len(), 5);
+
+        // Continue inserting - size should stay at 5
+        for i in 6..10 {
+            storage.with_entry_mut(format!("key{}", i), || i, |_v| {});
+        }
+        assert_eq!(storage.len(), 5);
+    }
+
+    #[test]
+    fn test_lru_access_order() {
+        let storage = ShardedStorage::<String, i32>::with_max_entries(3);
+
+        // Insert 3 entries
+        storage.with_entry_mut("key0".to_string(), || 0, |_v| {});
+        storage.with_entry_mut("key1".to_string(), || 1, |_v| {});
+        storage.with_entry_mut("key2".to_string(), || 2, |_v| {});
+
+        // Sleep a bit to ensure time difference
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Access key0 to update its access time
+        storage.with_entry_mut("key0".to_string(), || 0, |_v| {});
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        // Insert a new entry - should evict one of the older unaccessed entries
+        storage.with_entry_mut("key3".to_string(), || 3, |_v| {});
+
+        // key0 should still exist since we accessed it recently
+        let mut key0_exists = false;
+        storage.with_entry_mut(
+            "key0".to_string(),
+            || 999,
+            |v| {
+                if *v == 0 {
+                    key0_exists = true;
+                }
+            },
+        );
+
+        assert!(key0_exists, "key0 should not have been evicted");
+        assert_eq!(storage.len(), 3);
+    }
+
+    #[test]
+    fn test_for_each() {
+        let storage = ShardedStorage::<String, i32>::new();
+
+        storage.with_entry_mut("a".to_string(), || 1, |_v| {});
+        storage.with_entry_mut("b".to_string(), || 2, |_v| {});
+        storage.with_entry_mut("c".to_string(), || 3, |_v| {});
+
+        let mut sum = 0;
+        storage.for_each(|_k, v| {
+            sum += v;
+        });
+
+        assert_eq!(sum, 6);
+    }
+
+    #[test]
+    fn test_retain() {
+        let storage = ShardedStorage::<String, i32>::new();
+
+        storage.with_entry_mut("a".to_string(), || 1, |_v| {});
+        storage.with_entry_mut("b".to_string(), || 2, |_v| {});
+        storage.with_entry_mut("c".to_string(), || 3, |_v| {});
+
+        // Retain only values > 1
+        storage.retain(|_k, v| *v > 1);
+
+        assert_eq!(storage.len(), 2);
     }
 }

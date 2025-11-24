@@ -33,57 +33,87 @@ impl SuppressionCounter {
 
     /// Record a new suppression event.
     pub fn record_suppression(&self, timestamp: Instant) {
-        self.suppressed_count.fetch_add(1, Ordering::Relaxed);
+        // Use AcqRel for fetch_add to synchronize with other threads
+        self.suppressed_count.fetch_add(1, Ordering::AcqRel);
         let nanos = Self::instant_to_nanos(timestamp);
-        self.last_suppressed_nanos.store(nanos, Ordering::Relaxed);
+        // Use Release to ensure timestamp update is visible
+        self.last_suppressed_nanos.store(nanos, Ordering::Release);
     }
 
     /// Get the current suppression count.
     pub fn count(&self) -> usize {
-        self.suppressed_count.load(Ordering::Relaxed)
+        // Use Acquire to synchronize with Release/AcqRel operations
+        self.suppressed_count.load(Ordering::Acquire)
     }
 
     /// Get the timestamp of the first suppression.
     pub fn first_suppressed(&self) -> Instant {
-        let nanos = self.first_suppressed_nanos.load(Ordering::Relaxed);
+        // Use Acquire to synchronize with Release stores
+        let nanos = self.first_suppressed_nanos.load(Ordering::Acquire);
         Self::nanos_to_instant(nanos)
     }
 
     /// Get the timestamp of the last suppression.
     pub fn last_suppressed(&self) -> Instant {
-        let nanos = self.last_suppressed_nanos.load(Ordering::Relaxed);
+        // Use Acquire to synchronize with Release stores
+        let nanos = self.last_suppressed_nanos.load(Ordering::Acquire);
         Self::nanos_to_instant(nanos)
     }
 
     /// Reset the counter for a new tracking period.
+    ///
+    /// # Thread Safety
+    ///
+    /// Note: This method updates multiple fields independently, so there is no
+    /// guarantee that a concurrent reader will see all updates atomically. A reader
+    /// could observe the count reset to 0 while timestamps still reflect old values,
+    /// or vice versa. This is acceptable in practice since reset is typically called
+    /// during initialization or between tracking periods when concurrent access is minimal.
+    ///
+    /// If you need atomic reset semantics, ensure no concurrent access during reset.
     pub fn reset(&self, timestamp: Instant) {
         let nanos = Self::instant_to_nanos(timestamp);
-        self.suppressed_count.store(0, Ordering::Relaxed);
-        self.first_suppressed_nanos.store(nanos, Ordering::Relaxed);
-        self.last_suppressed_nanos.store(nanos, Ordering::Relaxed);
+        // Use Release for visibility
+        self.suppressed_count.store(0, Ordering::Release);
+        self.first_suppressed_nanos.store(nanos, Ordering::Release);
+        self.last_suppressed_nanos.store(nanos, Ordering::Release);
+    }
+
+    /// Get the shared base instant for timestamp calculations.
+    ///
+    /// This ensures instant_to_nanos and nanos_to_instant use the same reference point.
+    fn base_instant() -> &'static Instant {
+        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        BASE.get_or_init(Instant::now)
     }
 
     /// Convert Instant to nanoseconds for atomic storage.
     ///
     /// We store relative to a base instant to avoid overflow issues.
+    ///
+    /// # Overflow Handling
+    ///
+    /// If the duration exceeds u64::MAX nanoseconds (~584 years), it saturates
+    /// at u64::MAX. This is handled gracefully in nanos_to_instant().
     fn instant_to_nanos(instant: Instant) -> u64 {
-        // Use a static base instant (process start time approximation)
-        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        let base = BASE.get_or_init(Instant::now);
-
+        let base = Self::base_instant();
         instant
             .saturating_duration_since(*base)
             .as_nanos()
-            .try_into()
-            .unwrap_or(u64::MAX)
+            .min(u64::MAX as u128) as u64
     }
 
     /// Convert nanoseconds back to Instant.
+    ///
+    /// # Overflow Handling
+    ///
+    /// If adding the duration would overflow Instant (practically impossible - requires
+    /// ~584 years of uptime), returns the base instant. This ensures timestamps never
+    /// panic even in extreme edge cases.
     fn nanos_to_instant(nanos: u64) -> Instant {
-        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-        let base = BASE.get_or_init(Instant::now);
-
-        *base + Duration::from_nanos(nanos)
+        let base = Self::base_instant();
+        base.checked_add(Duration::from_nanos(nanos))
+            .unwrap_or(*base)
     }
 }
 

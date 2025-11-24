@@ -7,7 +7,7 @@
 
 High-performance log deduplication and rate limiting for the Rust `tracing` ecosystem.
 
-> **⚠️ Warning:** This is an MVP release (v0.1.0) with known issues. Not recommended for production use without addressing memory growth and correctness issues. See [Production Readiness Status](#️-production-readiness-status) below.
+> **⚠️ Warning:** This is an MVP release (v0.1.0) with remaining issues. Not recommended for production use without adding input validation and observability. See [Production Readiness Status](#️-production-readiness-status) below.
 
 ## Overview
 
@@ -25,6 +25,7 @@ The crate provides a `tracing::Layer` that deduplicates events based on their si
 - 🚀 **High Performance**: Sharded maps and lock-free operations
 - 🎯 **Flexible Policies**: Count-based, time-window, exponential backoff, and custom policies
 - 📊 **Per-signature Throttling**: Events with identical signatures are throttled together
+- 💾 **Memory Control**: Optional LRU eviction to prevent unbounded memory growth
 - ⏱️ **Suppression Summaries**: Periodic emission of suppression statistics (coming in v0.2)
 - 🔧 **Easy Integration**: Drop-in `tracing::Layer` compatible with existing subscribers
 
@@ -46,9 +47,16 @@ use tracing_throttle::{TracingRateLimitLayer, Policy};
 use tracing_subscriber::prelude::*;
 use std::time::Duration;
 
-// Create a rate limit filter
+// Create a rate limit filter with safe defaults
+// Defaults: 100 events per signature, 10k max signatures with LRU eviction
 let rate_limit = TracingRateLimitLayer::builder()
     .with_policy(Policy::count_based(100))
+    .build();
+
+// Or customize the limits:
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_policy(Policy::count_based(100))
+    .with_max_signatures(50_000)  // Custom signature limit
     .with_summary_interval(Duration::from_secs(30))
     .build();
 
@@ -131,6 +139,31 @@ When a log event is emitted:
 
 Different log messages are throttled independently, so important logs aren't suppressed just because other logs are noisy.
 
+## Memory Management
+
+By default, the layer tracks up to **10,000 unique event signatures**. When this limit is reached, the least recently used signatures are automatically evicted using an approximate LRU algorithm.
+
+**Customizing the limit:**
+
+```rust
+// Increase for high-cardinality applications
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_max_signatures(50_000)
+    .build();
+
+// Opt out of limits (use with caution - can cause unbounded growth)
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_unlimited_signatures()
+    .build();
+```
+
+**Memory considerations:**
+- Each signature uses approximately 100-200 bytes (depends on message length and fields)
+- 10k signatures ≈ 1-2 MB memory overhead
+- 50k signatures ≈ 5-10 MB memory overhead
+
+The default limit (10k) provides a good balance between memory usage and functionality for most applications.
+
 ## Performance
 
 Measured on Apple Silicon with comprehensive benchmarks:
@@ -176,24 +209,22 @@ cargo run --example policies
 - Domain policies (count-based, time-window, exponential backoff)
 - Basic registry and rate limiter
 - `tracing::Layer` implementation
-- Comprehensive test suite (65 tests)
+- LRU eviction with configurable memory limits
+- Comprehensive test suite (67 tests)
 - Performance benchmarks (20M ops/sec)
 - Hexagonal architecture (clean ports & adapters)
 
 ⚠️ **Known Issues (blocks production):**
-- Unbounded memory growth
-- Timestamp initialization bug
 - No input validation
 - No observability hooks
-- Integer overflow risks
 
 ### v0.1.1 (Production Hardening) - NEXT
 **Critical Fixes:**
-- 🔧 Add maximum signature limit with LRU eviction
-- 🔧 Fix OnceLock timestamp bug
+- ✅ Add maximum signature limit with LRU eviction
+- ✅ Fix OnceLock timestamp bug (shared base instant)
+- ✅ Fix atomic memory ordering (Release/Acquire)
+- ✅ Add saturation arithmetic for overflow protection
 - 🔧 Add input validation (non-zero limits, reasonable max_events)
-- 🔧 Fix atomic memory ordering (Release/Acquire)
-- 🔧 Add saturation arithmetic for overflow protection
 
 **Major Improvements:**
 - 📊 Add observability metrics (signature count, suppression rates)

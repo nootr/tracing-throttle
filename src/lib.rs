@@ -9,9 +9,7 @@
 //! # ⚠️ Production Readiness Warning
 //!
 //! **This is an MVP release (v0.1.0) with known issues:**
-//! - Unbounded memory growth (registry never evicts old signatures)
-//! - Timestamp initialization bug causing potential data corruption
-//! - No input validation or memory limits
+//! - No input validation
 //! - No observability metrics
 //!
 //! **Not recommended for production use** without addressing these issues.
@@ -25,8 +23,15 @@
 //! use tracing_subscriber::prelude::*;
 //! use std::time::Duration;
 //!
+//! // Uses safe defaults: 100 events, 10k signature limit
 //! let rate_limit = TracingRateLimitLayer::builder()
 //!     .with_policy(Policy::count_based(100))
+//!     .build();
+//!
+//! // Or customize:
+//! let rate_limit = TracingRateLimitLayer::builder()
+//!     .with_policy(Policy::count_based(100))
+//!     .with_max_signatures(50_000)  // Custom limit
 //!     .with_summary_interval(Duration::from_secs(30))
 //!     .build();
 //!
@@ -43,6 +48,7 @@
 //! - **Exponential backoff**: Emit at exponentially increasing intervals (1st, 2nd, 4th, 8th...)
 //! - **Custom policies**: Implement your own rate limiting logic
 //! - **Per-signature throttling**: Different messages are throttled independently
+//! - **LRU eviction**: Optional memory limits with automatic eviction of least recently used signatures
 
 // Domain layer - pure business logic
 pub mod domain;

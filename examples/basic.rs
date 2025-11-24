@@ -9,6 +9,7 @@ use tracing_throttle::{Policy, TracingRateLimitLayer};
 
 fn main() {
     // Create a rate limit layer with a count-based policy
+    // Default: max 10,000 signatures with LRU eviction
     let rate_limit_layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(3))
         .build();

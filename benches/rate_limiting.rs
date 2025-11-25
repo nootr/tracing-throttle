@@ -184,8 +184,7 @@ fn bench_signature_diversity(c: &mut Criterion) {
             .collect();
 
         b.iter(|| {
-            for i in 0..1000 {
-                let sig = sigs[i];
+            for &sig in &sigs {
                 black_box(limiter.check_event(black_box(sig)));
             }
         })

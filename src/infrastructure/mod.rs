@@ -8,3 +8,17 @@
 pub mod clock;
 pub mod layer;
 pub mod storage;
+
+/// Mock implementations for testing.
+///
+/// This module is only available when the `test-helpers` feature is enabled,
+/// or during test builds. It provides controllable test doubles for testing
+/// rate limiting behavior.
+///
+/// To use these mocks in integration tests, add to your `Cargo.toml`:
+/// ```toml
+/// [dev-dependencies]
+/// tracing-throttle = { version = "*", features = ["test-helpers"] }
+/// ```
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod mocks;

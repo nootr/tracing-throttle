@@ -140,7 +140,8 @@ where
 mod tests {
     use super::*;
     use crate::domain::policy::Policy;
-    use crate::infrastructure::clock::{MockClock, SystemClock};
+    use crate::infrastructure::clock::SystemClock;
+    use crate::infrastructure::mocks::MockClock;
     use crate::infrastructure::storage::ShardedStorage;
     use std::sync::Arc;
     use std::time::Instant;

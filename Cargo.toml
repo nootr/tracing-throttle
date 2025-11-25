@@ -6,8 +6,11 @@ authors = ["Joris Hartog"]
 license = "MIT"
 description = "High-performance log deduplication and rate limiting for the tracing ecosystem"
 repository = "https://github.com/nootr/tracing-throttle"
+documentation = "https://docs.rs/tracing-throttle"
+readme = "README.md"
 keywords = ["tracing", "logging", "rate-limiting", "deduplication", "throttle"]
 categories = ["development-tools::debugging", "asynchronous"]
+rust-version = "1.70"
 
 [dependencies]
 # Core tracing support

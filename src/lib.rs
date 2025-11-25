@@ -14,11 +14,8 @@
 //! use tracing_subscriber::prelude::*;
 //! use std::time::Duration;
 //!
-//! // Uses safe defaults: 100 events, 10k signature limit
-//! let rate_limit = TracingRateLimitLayer::builder()
-//!     .with_policy(Policy::count_based(100).unwrap())
-//!     .build()
-//!     .unwrap();
+//! // Use sensible defaults: 100 events, 10k signature limit
+//! let rate_limit = TracingRateLimitLayer::new();
 //!
 //! // Or customize:
 //! let rate_limit = TracingRateLimitLayer::builder()

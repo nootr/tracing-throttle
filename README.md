@@ -47,19 +47,8 @@ use tracing_subscriber::prelude::*;
 use std::time::Duration;
 
 // Create a rate limit filter with safe defaults
-// Defaults: 100 events per signature, 10k max signatures with LRU eviction
-let rate_limit = TracingRateLimitLayer::builder()
-    .with_policy(Policy::count_based(100).expect("valid policy"))
-    .build()
-    .expect("valid config");
-
-// Or customize the limits:
-let rate_limit = TracingRateLimitLayer::builder()
-    .with_policy(Policy::count_based(100).expect("valid policy"))
-    .with_max_signatures(50_000)  // Custom signature limit
-    .with_summary_interval(Duration::from_secs(30))
-    .build()
-    .expect("valid config");
+// Defaults: 100 events per signature, 10k max signatures with LRU eviction and a 30 second summary interval.
+let rate_limit = TracingRateLimitLayer::new();
 
 // Add it as a filter to your fmt layer
 tracing_subscriber::registry()
@@ -120,23 +109,6 @@ println!("Tracked signatures: {}", rate_limit.signature_count());
 
 `tracing-throttle` uses a circuit breaker pattern to prevent cascading failures. If rate limiting operations fail (e.g., panics or internal errors), the library **fails open** to preserve observability:
 
-```rust
-use tracing_throttle::{TracingRateLimitLayer, CircuitState};
-
-let rate_limit = TracingRateLimitLayer::new();
-
-// Check circuit breaker health
-let cb = rate_limit.circuit_breaker();
-match cb.state() {
-    CircuitState::Closed => println!("Rate limiting operating normally"),
-    CircuitState::Open => println!("Circuit open - failing open (allowing all events)"),
-    CircuitState::HalfOpen => println!("Testing recovery"),
-}
-
-println!("Consecutive failures: {}", cb.consecutive_failures());
-```
-
-**Circuit Breaker Behavior:**
 - **Closed**: Normal operation, rate limiting active
 - **Open**: After threshold failures (default: 5), fails open and allows all events
 - **HalfOpen**: After recovery timeout (default: 30s), tests if system has recovered
@@ -202,16 +174,6 @@ impl RateLimitPolicy for MyCustomPolicy {
 }
 ```
 
-## How It Works
-
-When a log event is emitted:
-1. A signature is computed from the event's level, message, and fields
-2. The rate limiting policy is checked for that signature
-3. The event is either allowed through or suppressed
-4. Suppression counts are tracked per signature
-
-Different log messages are throttled independently, so important logs aren't suppressed just because other logs are noisy.
-
 ## Memory Management
 
 By default, the layer tracks up to **10,000 unique event signatures** with LRU eviction. Each signature uses approximately **150-250 bytes**.
@@ -233,8 +195,6 @@ let sig_count = rate_limit.signature_count();
 let evictions = rate_limit.metrics().signatures_evicted();
 ```
 
-**⚠️ High-cardinality warning:** Avoid logging fields with unbounded cardinality (UUIDs, timestamps, request IDs) as they will cause rapid memory growth and eviction.
-
 📖 **See [detailed memory documentation](https://docs.rs/tracing-throttle/latest/tracing_throttle/#memory-management) for:**
 - Memory breakdown and overhead calculations
 - Signature cardinality analysis and estimation
@@ -242,23 +202,6 @@ let evictions = rate_limit.metrics().signatures_evicted();
 - Production monitoring and profiling techniques
 
 ## Performance
-
-Measured on Apple Silicon with comprehensive benchmarks:
-
-**Throughput:**
-- **20 million** rate limiting decisions/sec (single-threaded)
-- **44 million** ops/sec with 8 threads
-- Scales well with concurrent access
-
-**Latency:**
-- Signature computation: **13-37ns** (simple), **200ns** (20 fields)
-- Rate limit decision: **~50ns** per operation
-
-**Design:**
-- ahash for fast non-cryptographic hashing
-- DashMap for lock-free concurrent access
-- Atomic operations for lock-free counters
-- Zero allocations in the hot path
 
 See [BENCHMARKS.md](BENCHMARKS.md) for detailed measurements and methodology.
 
@@ -281,31 +224,28 @@ cargo run --example policies
 
 ## Roadmap
 
-### v0.1.0 (Current - MVP Release)
+### v0.1.0 (Current - Published)
 ✅ **Completed:**
 - Domain policies (count-based, time-window, exponential backoff)
 - Basic registry and rate limiter
 - `tracing::Layer` implementation
 - LRU eviction with configurable memory limits
-- Comprehensive test suite (105 tests: 94 unit + 11 doc)
+- Maximum signature limit with LRU eviction
+- Input validation (non-zero limits, durations, reasonable max_events)
+- Observability metrics (events allowed/suppressed, eviction tracking, signature count)
+- Circuit breaker for fail-safe operation
+- Memory usage documentation
+- Comprehensive integration tests (9 tests)
+- Mock infrastructure with test-helpers feature
+- Comprehensive test suite (118 tests: 95 unit + 9 integration + 14 doc)
 - Performance benchmarks (20M ops/sec)
 - Hexagonal architecture (clean ports & adapters)
-- Observability metrics (events allowed/suppressed, eviction tracking)
+- CI/CD workflows (test, lint, publish)
 
 ### v0.1.1 (Production Hardening) - NEXT
-**Critical Fixes:**
-- ✅ Add maximum signature limit with LRU eviction
-- ✅ Fix OnceLock timestamp bug (shared base instant)
-- ✅ Fix atomic memory ordering (Release/Acquire)
-- ✅ Add saturation arithmetic for overflow protection
-- ✅ Add input validation (non-zero limits, durations, and reasonable max_events)
-- ✅ Add observability metrics (signature count, suppression rates)
-
-**Major Improvements:**
-- 🛡️ Add circuit breaker for fail-safe operation
-- 📚 Document memory implications and limitations
+**Remaining Items:**
 - ⚙️ Add graceful shutdown for async emitter
-- 🧪 Add integration tests for edge cases
+- 📊 Additional edge case testing and production validation
 
 ### v0.2.0 (Enhanced Observability)
 - Active suppression summary emission

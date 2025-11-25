@@ -4,7 +4,7 @@
 //!
 //! # Testing
 //!
-//! See [`crate::infrastructure::mocks::MockClock`] for a controllable test clock.
+//! See `MockClock` (in `crate::infrastructure::mocks`) for a controllable test clock.
 //! Available with the `test-helpers` feature or in test builds:
 //!
 //! ```toml

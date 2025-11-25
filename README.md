@@ -235,16 +235,23 @@ cargo run --example policies
 - Observability metrics (events allowed/suppressed, eviction tracking, signature count)
 - Circuit breaker for fail-safe operation
 - Memory usage documentation
-- Comprehensive integration tests (9 tests)
+- Comprehensive integration tests
 - Mock infrastructure with test-helpers feature
-- Comprehensive test suite (118 tests: 95 unit + 9 integration + 14 doc)
+- Extensive test coverage (unit, integration, and doc tests)
 - Performance benchmarks (20M ops/sec)
 - Hexagonal architecture (clean ports & adapters)
 - CI/CD workflows (test, lint, publish)
 
-### v0.1.1 (Production Hardening) - NEXT
+### v0.1.1 (Production Hardening) - IN PROGRESS
+✅ **Completed:**
+- Graceful shutdown for async emitter with `EmitterHandle`
+- Comprehensive shutdown testing
+- Automatic cleanup via Drop implementation
+- Final emission support on shutdown
+- Panic safety for emit functions
+- Improved error handling and diagnostics
+
 **Remaining Items:**
-- ⚙️ Add graceful shutdown for async emitter
 - 📊 Additional edge case testing and production validation
 
 ### v0.2.0 (Enhanced Observability)

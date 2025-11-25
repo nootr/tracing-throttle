@@ -24,7 +24,7 @@ ahash = "0.8"
 dashmap = "6.0"
 
 # Time handling
-tokio = { version = "1", features = ["time", "sync", "rt"], optional = true }
+tokio = { version = "1", features = ["time", "sync", "rt", "macros"], optional = true }
 
 [dev-dependencies]
 tracing-throttle = { path = ".", features = ["test-helpers"] }

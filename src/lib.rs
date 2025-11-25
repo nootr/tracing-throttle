@@ -282,6 +282,9 @@ pub use application::{
     registry::SuppressionRegistry,
 };
 
+#[cfg(feature = "async")]
+pub use application::emitter::EmitterHandle;
+
 pub use infrastructure::{
     clock::SystemClock,
     layer::{BuildError, TracingRateLimitLayer, TracingRateLimitLayerBuilder},

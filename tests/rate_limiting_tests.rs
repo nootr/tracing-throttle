@@ -1,3 +1,5 @@
+//! Integration tests for rate limiting functionality.
+
 use tracing::{info, warn, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Layer;

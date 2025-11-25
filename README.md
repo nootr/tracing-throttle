@@ -42,9 +42,8 @@ tracing-subscriber = "0.3.20"
 ## Quick Start
 
 ```rust
-use tracing_throttle::{TracingRateLimitLayer, Policy};
+use tracing_throttle::TracingRateLimitLayer;
 use tracing_subscriber::prelude::*;
-use std::time::Duration;
 
 // Create a rate limit filter with safe defaults
 // Defaults: 100 events per signature, 10k max signatures with LRU eviction and a 30 second summary interval.

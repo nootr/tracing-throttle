@@ -32,6 +32,35 @@ impl std::fmt::Display for EmitterConfigError {
 
 impl std::error::Error for EmitterConfigError {}
 
+/// Error returned when emitter shutdown fails.
+#[cfg(feature = "async")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShutdownError {
+    /// Task panicked during shutdown
+    TaskPanicked,
+    /// Task was cancelled before completing
+    TaskCancelled,
+    /// Shutdown exceeded the specified timeout
+    Timeout,
+    /// Failed to send shutdown signal (task may have already exited)
+    SignalFailed,
+}
+
+#[cfg(feature = "async")]
+impl std::fmt::Display for ShutdownError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShutdownError::TaskPanicked => write!(f, "emitter task panicked during shutdown"),
+            ShutdownError::TaskCancelled => write!(f, "emitter task was cancelled"),
+            ShutdownError::Timeout => write!(f, "shutdown exceeded timeout"),
+            ShutdownError::SignalFailed => write!(f, "failed to send shutdown signal"),
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+impl std::error::Error for ShutdownError {}
+
 /// Configuration for summary emission.
 #[derive(Debug, Clone)]
 pub struct EmitterConfig {
@@ -104,7 +133,7 @@ impl EmitterConfig {
 /// let handle = emitter.start(|_| {}, false);
 ///
 /// // Always call shutdown explicitly
-/// handle.shutdown().await;
+/// handle.shutdown().await.expect("shutdown failed");
 /// # }
 /// ```
 #[cfg(feature = "async")]
@@ -117,10 +146,16 @@ pub struct EmitterHandle {
 impl EmitterHandle {
     /// Trigger graceful shutdown and wait for the task to complete.
     ///
-    /// This method:
-    /// 1. Sends the shutdown signal
-    /// 2. Waits for the background task to finish
-    /// 3. Returns when shutdown is complete
+    /// This method uses a default timeout of 10 seconds. For custom timeout durations,
+    /// use [`shutdown_with_timeout`](Self::shutdown_with_timeout).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The task panics during shutdown
+    /// - The task is cancelled
+    /// - Shutdown exceeds the timeout (10 seconds)
+    /// - The shutdown signal fails to send
     ///
     /// # Examples
     ///
@@ -131,7 +166,7 @@ impl EmitterHandle {
     /// # use tracing_throttle::infrastructure::storage::ShardedStorage;
     /// # use tracing_throttle::infrastructure::clock::SystemClock;
     /// # use std::sync::Arc;
-    /// # async fn example() {
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// # let storage = Arc::new(ShardedStorage::new());
     /// # let clock = Arc::new(SystemClock::new());
     /// # let policy = Policy::count_based(100).unwrap();
@@ -142,41 +177,78 @@ impl EmitterHandle {
     ///
     /// // Do some work...
     ///
-    /// // Clean shutdown
-    /// handle.shutdown().await;
+    /// // Clean shutdown with default 10 second timeout
+    /// handle.shutdown().await?;
+    /// # Ok(())
     /// # }
     /// ```
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(self) -> Result<(), ShutdownError> {
+        self.shutdown_with_timeout(Duration::from_secs(10)).await
+    }
+
+    /// Trigger graceful shutdown with a custom timeout.
+    ///
+    /// This method:
+    /// 1. Sends the shutdown signal
+    /// 2. Waits for the background task to finish (up to the timeout)
+    /// 3. If the timeout is exceeded, the task is aborted
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The task panics during shutdown
+    /// - The task is cancelled
+    /// - Shutdown exceeds the specified timeout
+    /// - The shutdown signal fails to send
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::application::emitter::{SummaryEmitter, EmitterConfig};
+    /// # use tracing_throttle::application::registry::SuppressionRegistry;
+    /// # use tracing_throttle::domain::policy::Policy;
+    /// # use tracing_throttle::infrastructure::storage::ShardedStorage;
+    /// # use tracing_throttle::infrastructure::clock::SystemClock;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let storage = Arc::new(ShardedStorage::new());
+    /// # let clock = Arc::new(SystemClock::new());
+    /// # let policy = Policy::count_based(100).unwrap();
+    /// # let registry = SuppressionRegistry::new(storage, clock, policy);
+    /// # let config = EmitterConfig::default();
+    /// # let emitter = SummaryEmitter::new(registry, config);
+    /// let handle = emitter.start(|_| {}, false);
+    ///
+    /// // Do some work...
+    ///
+    /// // Clean shutdown with 5 second timeout
+    /// handle.shutdown_with_timeout(Duration::from_secs(5)).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn shutdown_with_timeout(
+        mut self,
+        timeout_duration: Duration,
+    ) -> Result<(), ShutdownError> {
+        use tokio::time::timeout;
+
         // Send shutdown signal
         if self.shutdown_tx.send(true).is_err() {
-            // This only fails if all receivers are dropped, which shouldn't happen
-            // in normal operation since we hold the receiver in the spawned task
-            #[cfg(debug_assertions)]
-            eprintln!("Warning: Failed to send shutdown signal - task may have already exited");
+            return Err(ShutdownError::SignalFailed);
         }
 
-        // Wait for task to complete
+        // Wait for task to complete with timeout
         if let Some(handle) = self.join_handle.take() {
-            match handle.await {
-                Ok(()) => {
-                    // Clean shutdown
-                }
-                Err(e) if e.is_panic() => {
-                    // Task panicked during shutdown
-                    #[cfg(debug_assertions)]
-                    eprintln!("Warning: Emitter task panicked during shutdown");
-                }
-                Err(e) if e.is_cancelled() => {
-                    // Task was cancelled (shouldn't happen in normal shutdown)
-                    #[cfg(debug_assertions)]
-                    eprintln!("Warning: Emitter task was cancelled");
-                }
-                Err(_) => {
-                    // Other error
-                    #[cfg(debug_assertions)]
-                    eprintln!("Warning: Emitter task failed during shutdown");
-                }
+            match timeout(timeout_duration, handle).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) if e.is_panic() => Err(ShutdownError::TaskPanicked),
+                Ok(Err(e)) if e.is_cancelled() => Err(ShutdownError::TaskCancelled),
+                Ok(Err(_)) => Err(ShutdownError::TaskPanicked), // Treat unknown errors as panics
+                Err(_) => Err(ShutdownError::Timeout),
             }
+        } else {
+            Ok(())
         }
     }
 
@@ -275,7 +347,7 @@ where
     /// }, true);
     ///
     /// // Later, trigger graceful shutdown
-    /// handle.shutdown().await;
+    /// handle.shutdown().await.expect("shutdown failed");
     /// # }
     /// ```
     #[cfg(feature = "async")]
@@ -303,6 +375,7 @@ where
                                 let summaries = self.collect_summaries();
                                 if !summaries.is_empty() {
                                     // Panic safety for final emission too
+                                    // Note: summaries will be properly dropped even if emit_fn panics
                                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                         emit_fn(summaries);
                                     }));
@@ -320,13 +393,13 @@ where
                         let summaries = self.collect_summaries();
                         if !summaries.is_empty() {
                             // Panic safety: catch panics in emit_fn to prevent task abort
+                            // Note: summaries will be properly dropped even if emit_fn panics
                             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 emit_fn(summaries);
                             }));
 
                             if result.is_err() {
-                                // emit_fn panicked - log but continue running
-                                // In production, you might want to track this in metrics
+                                // emit_fn panicked - summaries were dropped, continue running
                                 #[cfg(debug_assertions)]
                                 eprintln!("Warning: emit_fn panicked during emission");
                             }
@@ -470,7 +543,7 @@ mod tests {
         // Wait for a couple of intervals
         tokio::time::sleep(Duration::from_millis(250)).await;
 
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
 
         // Should have emitted at least once
         let emission_count = emissions.lock().unwrap().len();
@@ -526,7 +599,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         // Trigger graceful shutdown
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
 
         // Verify task is no longer running
         let final_count = *emissions.lock().unwrap();
@@ -574,7 +647,7 @@ mod tests {
 
         // Shutdown before next interval (which is 60 seconds away)
         tokio::time::sleep(Duration::from_millis(50)).await;
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
 
         // Should have emitted final summaries
         let emission_list = emissions.lock().unwrap();
@@ -616,7 +689,7 @@ mod tests {
 
         // Shutdown immediately (before next 60-second interval)
         tokio::time::sleep(Duration::from_millis(50)).await;
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
 
         // Should not have emitted anything (no final emission)
         assert_eq!(*emissions.lock().unwrap(), 0);
@@ -638,7 +711,7 @@ mod tests {
         assert!(handle.is_running());
 
         // Shutdown
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
 
         // Should no longer be running
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -680,9 +753,79 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(60)).await;
 
         // Shutdown should wait for current emission to complete
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
 
         // Current emission should have completed
         assert!(*emissions.lock().unwrap() >= 1);
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_shutdown_with_custom_timeout() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_millis(100)).unwrap();
+
+        let emitter = SummaryEmitter::new(registry, config);
+        let handle = emitter.start(|_| {}, false);
+
+        // Let it run briefly
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        // Shutdown with custom timeout should succeed quickly
+        let result = handle.shutdown_with_timeout(Duration::from_secs(5)).await;
+        assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_panic_in_emit_fn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_millis(50)).unwrap();
+
+        // Add suppressions
+        let sig = EventSignature::simple("INFO", "Test");
+        registry.with_event_state(sig, |state, now| {
+            for _ in 0..5 {
+                state.counter.record_suppression(now);
+            }
+        });
+
+        let emitter = SummaryEmitter::new(registry, config);
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let handle = emitter.start(
+            move |_summaries| {
+                let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
+
+                // Panic on first call, succeed on subsequent calls
+                if count == 0 {
+                    panic!("intentional panic for testing");
+                }
+                // If we get here, panic was handled and task continued
+            },
+            false,
+        );
+
+        // Let it emit multiple times - first should panic, rest should succeed
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        handle.shutdown().await.expect("shutdown failed");
+
+        // Should have attempted multiple emissions (first panicked, others succeeded)
+        let final_count = call_count.load(Ordering::SeqCst);
+        assert!(
+            final_count > 1,
+            "Task should continue after panic in emit_fn"
+        );
     }
 }

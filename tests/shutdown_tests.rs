@@ -86,7 +86,7 @@ async fn test_explicit_shutdown_required() {
     assert!(count_before_shutdown >= 1);
 
     // Explicitly call shutdown (required!)
-    handle.shutdown().await;
+    handle.shutdown().await.expect("shutdown failed");
 
     // Wait to ensure no more emissions after shutdown
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -142,7 +142,7 @@ async fn test_explicit_shutdown_in_application() {
 
         async fn shutdown(mut self) {
             if let Some(handle) = self._emitter_handle.take() {
-                handle.shutdown().await;
+                handle.shutdown().await.expect("shutdown failed");
             }
         }
 
@@ -195,7 +195,7 @@ async fn test_concurrent_shutdown_safety() {
 
     // Shut down all sequentially (demonstrating clean shutdown)
     for handle in handles {
-        handle.shutdown().await;
+        handle.shutdown().await.expect("shutdown failed");
     }
 
     // All shut down successfully

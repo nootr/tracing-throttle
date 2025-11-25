@@ -283,7 +283,7 @@ pub use application::{
 };
 
 #[cfg(feature = "async")]
-pub use application::emitter::EmitterHandle;
+pub use application::emitter::{EmitterHandle, ShutdownError};
 
 pub use infrastructure::{
     clock::SystemClock,

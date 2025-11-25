@@ -224,7 +224,7 @@ cargo run --example policies
 
 ## Roadmap
 
-### v0.1.0 (Current - Published)
+### v0.1.0 (MVP)
 ✅ **Completed:**
 - Domain policies (count-based, time-window, exponential backoff)
 - Basic registry and rate limiter
@@ -242,17 +242,18 @@ cargo run --example policies
 - Hexagonal architecture (clean ports & adapters)
 - CI/CD workflows (test, lint, publish)
 
-### v0.1.1 (Production Hardening) - IN PROGRESS
+### v0.1.1 (Production Hardening)
 ✅ **Completed:**
 - Graceful shutdown for async emitter with `EmitterHandle`
-- Comprehensive shutdown testing
-- Automatic cleanup via Drop implementation
+- Comprehensive shutdown testing (12 dedicated shutdown tests)
+- Explicit shutdown requirement (no Drop implementation to prevent race conditions)
 - Final emission support on shutdown
-- Panic safety for emit functions
+- Panic safety for emit functions with proper resource cleanup
+- Structured error handling with `ShutdownError` enum
+- Shutdown timeout support (default 10s, customizable)
 - Improved error handling and diagnostics
-
-**Remaining Items:**
-- 📊 Additional edge case testing and production validation
+- Biased shutdown signal prioritization for fast shutdown
+- Cancellation safety documentation
 
 ### v0.2.0 (Enhanced Observability)
 - Active suppression summary emission

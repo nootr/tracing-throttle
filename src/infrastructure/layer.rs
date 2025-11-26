@@ -26,7 +26,17 @@ use tracing_subscriber::{layer::Context, Layer};
 use crate::application::emitter::{EmitterHandle, SummaryEmitter};
 
 #[cfg(feature = "async")]
+use crate::domain::summary::SuppressionSummary;
+
+#[cfg(feature = "async")]
 use std::sync::Mutex;
+
+/// Function type for formatting suppression summaries.
+///
+/// Takes a reference to a `SuppressionSummary` and emits it as a tracing event.
+/// The function is responsible for choosing the log level and format.
+#[cfg(feature = "async")]
+pub type SummaryFormatter = Arc<dyn Fn(&SuppressionSummary) + Send + Sync + 'static>;
 
 /// Error returned when building a TracingRateLimitLayer fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,13 +69,14 @@ impl From<crate::application::emitter::EmitterConfigError> for BuildError {
 }
 
 /// Builder for constructing a `TracingRateLimitLayer`.
-#[derive(Debug)]
 pub struct TracingRateLimitLayerBuilder {
     policy: Policy,
     summary_interval: Duration,
     clock: Option<Arc<dyn Clock>>,
     max_signatures: Option<usize>,
     enable_active_emission: bool,
+    #[cfg(feature = "async")]
+    summary_formatter: Option<SummaryFormatter>,
 }
 
 impl TracingRateLimitLayerBuilder {
@@ -137,6 +148,41 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
+    /// Set a custom formatter for suppression summaries.
+    ///
+    /// The formatter is responsible for emitting summaries as tracing events.
+    /// This allows full control over log level, message format, and structured fields.
+    ///
+    /// **Requires the `async` feature.**
+    ///
+    /// If not set, a default formatter is used that emits at WARN level with
+    /// `signature` and `count` fields.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::TracingRateLimitLayer;
+    /// # use std::sync::Arc;
+    /// # use std::time::Duration;
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_active_emission(true)
+    ///     .with_summary_formatter(Arc::new(|summary| {
+    ///         tracing::info!(
+    ///             signature = %summary.signature,
+    ///             count = summary.count,
+    ///             duration_secs = summary.duration.as_secs(),
+    ///             "Suppression summary"
+    ///         );
+    ///     }))
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    #[cfg(feature = "async")]
+    pub fn with_summary_formatter(mut self, formatter: SummaryFormatter) -> Self {
+        self.summary_formatter = Some(formatter);
+        self
+    }
+
     /// Build the layer.
     ///
     /// # Errors
@@ -168,15 +214,23 @@ impl TracingRateLimitLayerBuilder {
         #[cfg(feature = "async")]
         let emitter_handle = if self.enable_active_emission {
             let emitter = SummaryEmitter::new(registry, emitter_config);
+
+            // Use custom formatter or default
+            let formatter = self.summary_formatter.unwrap_or_else(|| {
+                Arc::new(|summary: &SuppressionSummary| {
+                    tracing::warn!(
+                        signature = %summary.signature,
+                        count = summary.count,
+                        "{}",
+                        summary.format_message()
+                    );
+                })
+            });
+
             let handle = emitter.start(
-                |summaries| {
+                move |summaries| {
                     for summary in summaries {
-                        tracing::warn!(
-                            signature = %summary.signature,
-                            count = summary.count,
-                            "{}",
-                            summary.format_message()
-                        );
+                        formatter(&summary);
                     }
                 },
                 false, // Don't emit final summaries on shutdown
@@ -322,6 +376,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
     /// - Max signatures: 10,000 (with LRU eviction)
     /// - Summary interval: 30 seconds
     /// - Active emission: disabled
+    /// - Summary formatter: default (WARN level with signature and count)
     pub fn builder() -> TracingRateLimitLayerBuilder {
         TracingRateLimitLayerBuilder {
             policy: Policy::token_bucket(50.0, 1.0)
@@ -330,6 +385,8 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             clock: None,
             max_signatures: Some(10_000),
             enable_active_emission: false,
+            #[cfg(feature = "async")]
+            summary_formatter: None,
         }
     }
 
@@ -801,5 +858,101 @@ mod tests {
             .shutdown()
             .await
             .expect("shutdown should succeed when emitter not running");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_custom_summary_formatter() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        // Track formatter invocations
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&call_count);
+
+        // Track data passed to formatter
+        let last_count = Arc::new(AtomicUsize::new(0));
+        let last_count_clone = Arc::clone(&last_count);
+
+        // Create layer with custom formatter
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(2).unwrap())
+            .with_active_emission(true)
+            .with_summary_interval(Duration::from_millis(100))
+            .with_summary_formatter(Arc::new(move |summary| {
+                count_clone.fetch_add(1, Ordering::SeqCst);
+                last_count_clone.store(summary.count, Ordering::SeqCst);
+                // Custom format: emit at INFO level instead of WARN
+                tracing::info!(
+                    sig = %summary.signature,
+                    suppressed = summary.count,
+                    "Custom format"
+                );
+            }))
+            .build()
+            .unwrap();
+
+        // Emit events that will be suppressed
+        let sig = EventSignature::simple("INFO", "test_message");
+        for _ in 0..10 {
+            layer.should_allow(sig);
+        }
+
+        // Wait for emission
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Verify custom formatter was called
+        let calls = call_count.load(Ordering::SeqCst);
+        assert!(calls > 0, "Custom formatter should have been called");
+
+        // Verify formatter received correct data
+        let count = last_count.load(Ordering::SeqCst);
+        assert!(
+            count >= 8,
+            "Expected at least 8 suppressions, got {}",
+            count
+        );
+
+        layer.shutdown().await.expect("shutdown failed");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_default_formatter_used() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let emission_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&emission_count);
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(2).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+
+        let emitter_config = EmitterConfig::new(Duration::from_millis(100)).unwrap();
+        let emitter = SummaryEmitter::new(registry.clone(), emitter_config);
+
+        // Start without custom formatter - should use default
+        let handle = emitter.start(
+            move |summaries| {
+                count_clone.fetch_add(summaries.len(), Ordering::SeqCst);
+            },
+            false,
+        );
+
+        let sig = EventSignature::simple("INFO", "test_message");
+        for _ in 0..10 {
+            registry.with_event_state(sig, |state, now| {
+                state.counter.record_suppression(now);
+            });
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        let count = emission_count.load(Ordering::SeqCst);
+        assert!(count > 0, "Default formatter should have emitted summaries");
+
+        handle.shutdown().await.expect("shutdown failed");
     }
 }

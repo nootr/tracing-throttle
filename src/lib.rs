@@ -291,3 +291,6 @@ pub use infrastructure::{
     layer::{BuildError, TracingRateLimitLayer, TracingRateLimitLayerBuilder},
     storage::ShardedStorage,
 };
+
+#[cfg(feature = "async")]
+pub use infrastructure::layer::SummaryFormatter;

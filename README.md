@@ -57,7 +57,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-throttle = "0.1.1"
+tracing-throttle = "0.2"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 ```

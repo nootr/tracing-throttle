@@ -5,6 +5,66 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2025-11-26
+
+### Added
+
+#### Enhanced Observability Features
+
+- **Active Suppression Summary Emission** (requires `async` feature)
+  - New `.with_active_emission(bool)` builder method to enable automatic emission of suppression summaries
+  - Summaries emitted as structured WARN-level tracing events at configurable intervals
+  - Background task managed via `EmitterHandle` in spawned tokio task
+  - Disabled by default (opt-in to prevent surprise behavior)
+  - Graceful shutdown via `.shutdown().await` method
+
+- **Configurable Summary Formatting**
+  - New `SummaryFormatter` type: `Arc<dyn Fn(&SuppressionSummary) + Send + Sync + 'static>`
+  - New `.with_summary_formatter()` builder method for full control over emission format
+  - Customize log level, message format, and structured fields
+  - Default formatter preserves existing behavior (WARN level with signature/count fields)
+  - Completely optional and backward compatible
+
+- **Token Bucket Rate Limiting Policy**
+  - New default policy: `Policy::token_bucket(capacity, refill_rate)`
+  - Provides burst tolerance with natural recovery over time
+  - Replaces count-based policy as the recommended default
+  - Default configuration: 50 burst capacity, 1 token/sec (60/min sustained)
+  - Handles edge cases: time going backwards, fractional token accumulation
+  - 16 comprehensive tests including critical regression tests
+
+- **Metrics Integration Examples**
+  - Prometheus integration pattern documented in `metrics` module
+  - OpenTelemetry integration pattern documented in `metrics` module
+  - Examples show periodic export using `snapshot()` method
+  - No additional dependencies required (examples use `ignore` attribute)
+
+### Changed
+
+- **Breaking**: Default rate limiting policy changed from `count_based(100)` to `token_bucket(50.0, 1.0)`
+  - Provides better behavior for intermittent issues (natural recovery)
+  - Users relying on count-based behavior must explicitly configure it
+  - Migration: Use `.with_policy(Policy::count_based(100).unwrap())` to restore old behavior
+
+- **Builder Structure**: Removed `Debug` derive from `TracingRateLimitLayerBuilder`
+  - Required to support function pointer field (`summary_formatter`)
+  - Does not affect normal usage (builders are rarely debugged)
+
+### Improved
+
+- **Documentation**: Moved implementation details from README to API documentation
+  - README is now ~170 lines shorter and more scannable
+  - Rate Limiting Policies section condensed (all policies in same format)
+  - Observability & Metrics section simplified
+  - Fail-Safe Operation reduced to one paragraph
+  - Memory Management reduced to two sentences with link to docs
+  - Added links to docs.rs for detailed information
+
+- **Code Quality**
+  - All 160 tests passing (123 unit + 9 integration + 4 shutdown + 24 doc + 2 ignored)
+  - Zero clippy warnings
+  - Comprehensive test coverage for new features
+
 ## [0.1.1] - 2025-11-25
 
 ### Added

@@ -22,6 +22,12 @@ use tracing::{Metadata, Subscriber};
 use tracing_subscriber::layer::Filter;
 use tracing_subscriber::{layer::Context, Layer};
 
+#[cfg(feature = "async")]
+use crate::application::emitter::{EmitterHandle, SummaryEmitter};
+
+#[cfg(feature = "async")]
+use std::sync::Mutex;
+
 /// Error returned when building a TracingRateLimitLayer fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
@@ -59,6 +65,7 @@ pub struct TracingRateLimitLayerBuilder {
     summary_interval: Duration,
     clock: Option<Arc<dyn Clock>>,
     max_signatures: Option<usize>,
+    enable_active_emission: bool,
 }
 
 impl TracingRateLimitLayerBuilder {
@@ -105,6 +112,31 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
+    /// Enable active emission of suppression summaries.
+    ///
+    /// When enabled, the layer will automatically emit `WARN`-level tracing events
+    /// containing summaries of suppressed log events at the configured interval.
+    ///
+    /// **Requires the `async` feature** - this method has no effect without it.
+    ///
+    /// Default: disabled
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::TracingRateLimitLayer;
+    /// # use std::time::Duration;
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_active_emission(true)
+    ///     .with_summary_interval(Duration::from_secs(60))
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn with_active_emission(mut self, enabled: bool) -> Self {
+        self.enable_active_emission = enabled;
+        self
+    }
+
     /// Build the layer.
     ///
     /// # Errors
@@ -128,13 +160,37 @@ impl TracingRateLimitLayerBuilder {
             Arc::new(ShardedStorage::new().with_metrics(metrics.clone()))
         };
         let registry = SuppressionRegistry::new(storage, clock, self.policy);
-        let limiter = RateLimiter::new(registry, metrics.clone(), circuit_breaker);
+        let limiter = RateLimiter::new(registry.clone(), metrics.clone(), circuit_breaker);
 
         // Let EmitterConfig validate the interval
         let emitter_config = EmitterConfig::new(self.summary_interval)?;
 
+        #[cfg(feature = "async")]
+        let emitter_handle = if self.enable_active_emission {
+            let emitter = SummaryEmitter::new(registry, emitter_config);
+            let handle = emitter.start(
+                |summaries| {
+                    for summary in summaries {
+                        tracing::warn!(
+                            signature = %summary.signature,
+                            count = summary.count,
+                            "{}",
+                            summary.format_message()
+                        );
+                    }
+                },
+                false, // Don't emit final summaries on shutdown
+            );
+            Arc::new(Mutex::new(Some(handle)))
+        } else {
+            Arc::new(Mutex::new(None))
+        };
+
         Ok(TracingRateLimitLayer {
             limiter,
+            #[cfg(feature = "async")]
+            emitter_handle,
+            #[cfg(not(feature = "async"))]
             _emitter_config: emitter_config,
         })
     }
@@ -144,12 +200,18 @@ impl TracingRateLimitLayerBuilder {
 ///
 /// This layer intercepts events, computes their signature, and decides
 /// whether to allow or suppress them based on the configured policy.
+///
+/// Optionally emits periodic summaries of suppressed events when active
+/// emission is enabled (requires `async` feature).
 #[derive(Clone)]
 pub struct TracingRateLimitLayer<S = Arc<ShardedStorage<EventSignature, EventState>>>
 where
     S: Storage<EventSignature, EventState> + Clone,
 {
     limiter: RateLimiter<S>,
+    #[cfg(feature = "async")]
+    emitter_handle: Arc<Mutex<Option<EmitterHandle>>>,
+    #[cfg(not(feature = "async"))]
     _emitter_config: EmitterConfig,
 }
 
@@ -209,6 +271,47 @@ where
     pub fn circuit_breaker(&self) -> &Arc<CircuitBreaker> {
         self.limiter.circuit_breaker()
     }
+
+    /// Shutdown the active suppression summary emitter, if running.
+    ///
+    /// This method gracefully stops the background emission task.  If active emission
+    /// is not enabled, this method does nothing.
+    ///
+    /// **Requires the `async` feature.**
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the emitter task fails to shut down gracefully.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::TracingRateLimitLayer;
+    /// # async fn example() {
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_active_emission(true)
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// // Use the layer...
+    ///
+    /// // Shutdown before dropping
+    /// layer.shutdown().await.expect("shutdown failed");
+    /// # }
+    /// ```
+    #[cfg(feature = "async")]
+    pub async fn shutdown(&self) -> Result<(), crate::application::emitter::ShutdownError> {
+        // Take the handle while holding the lock, then release the lock before awaiting
+        let handle = {
+            let mut handle_guard = self.emitter_handle.lock().unwrap();
+            handle_guard.take()
+        };
+
+        if let Some(handle) = handle {
+            handle.shutdown().await?;
+        }
+        Ok(())
+    }
 }
 
 impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
@@ -218,6 +321,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
     /// - Policy: token bucket (50 burst capacity, 1 token/sec refill rate)
     /// - Max signatures: 10,000 (with LRU eviction)
     /// - Summary interval: 30 seconds
+    /// - Active emission: disabled
     pub fn builder() -> TracingRateLimitLayerBuilder {
         TracingRateLimitLayerBuilder {
             policy: Policy::token_bucket(50.0, 1.0)
@@ -225,6 +329,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             summary_interval: Duration::from_secs(30),
             clock: None,
             max_signatures: Some(10_000),
+            enable_active_emission: false,
         }
     }
 
@@ -552,6 +657,9 @@ mod tests {
 
         let layer = TracingRateLimitLayer {
             limiter,
+            #[cfg(feature = "async")]
+            emitter_handle: Arc::new(Mutex::new(None)),
+            #[cfg(not(feature = "async"))]
             _emitter_config: crate::application::emitter::EmitterConfig::new(Duration::from_secs(
                 30,
             ))
@@ -584,5 +692,114 @@ mod tests {
         // Metrics should show these as allowed (fail-open behavior)
         let snapshot = layer.metrics().snapshot();
         assert!(snapshot.events_allowed >= 5); // 2 normal + 3 fail-open
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_active_emission_integration() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        // Use an atomic counter to track emissions
+        let emission_count = Arc::new(AtomicUsize::new(0));
+        let count_clone = Arc::clone(&emission_count);
+
+        // Create a layer with a custom emitter that increments our counter
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(2).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+
+        let emitter_config = EmitterConfig::new(Duration::from_millis(100)).unwrap();
+        let emitter = SummaryEmitter::new(registry.clone(), emitter_config);
+
+        // Start emitter with custom callback
+        let handle = emitter.start(
+            move |summaries| {
+                count_clone.fetch_add(summaries.len(), Ordering::SeqCst);
+            },
+            false,
+        );
+
+        // Emit events that will be suppressed
+        let sig = EventSignature::simple("INFO", "test_message");
+        for _ in 0..10 {
+            registry.with_event_state(sig, |state, now| {
+                state.counter.record_suppression(now);
+            });
+        }
+
+        // Wait for at least two emission intervals
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Check that summaries were emitted
+        let count = emission_count.load(Ordering::SeqCst);
+        assert!(
+            count > 0,
+            "Expected at least one suppression summary to be emitted, got {}",
+            count
+        );
+
+        // Graceful shutdown
+        handle.shutdown().await.expect("shutdown failed");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_active_emission_disabled() {
+        use crate::infrastructure::mocks::layer::MockCaptureLayer;
+        use std::time::Duration;
+
+        // Create layer with active emission disabled (default)
+        let layer = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(2).unwrap())
+            .with_summary_interval(Duration::from_millis(100))
+            .build()
+            .unwrap();
+
+        let mock = MockCaptureLayer::new();
+        let mock_clone = mock.clone();
+
+        let subscriber = tracing_subscriber::registry()
+            .with(mock)
+            .with(tracing_subscriber::fmt::layer().with_filter(layer.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let sig = EventSignature::simple("INFO", "test_message");
+            for _ in 0..10 {
+                layer.should_allow(sig);
+            }
+        });
+
+        // Wait to ensure no emissions occur
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // Should not have emitted any summaries
+        let events = mock_clone.get_captured();
+        let summary_count = events
+            .iter()
+            .filter(|e| e.message.contains("suppressed"))
+            .count();
+
+        assert_eq!(
+            summary_count, 0,
+            "Should not emit summaries when active emission is disabled"
+        );
+
+        // Shutdown should succeed even when emitter was never started
+        layer.shutdown().await.expect("shutdown failed");
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_shutdown_without_emission() {
+        // Test that shutdown works when emission was never enabled
+        let layer = TracingRateLimitLayer::new();
+
+        // Should not error
+        layer
+            .shutdown()
+            .await
+            .expect("shutdown should succeed when emitter not running");
     }
 }

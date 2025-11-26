@@ -180,7 +180,31 @@ impl RateLimitPolicy for MyCustomPolicy {
 
 ## Observability & Metrics
 
-Monitor rate limiting behavior with built-in metrics:
+### Active Suppression Summaries
+
+Enable automatic emission of suppression statistics as `WARN`-level log events:
+
+```rust
+use tracing_throttle::TracingRateLimitLayer;
+use std::time::Duration;
+
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_active_emission(true)
+    .with_summary_interval(Duration::from_secs(60))
+    .build()
+    .expect("valid config");
+
+// Suppression summaries will now be automatically emitted every 60 seconds
+// Example output: "Suppressed 1,234 events (signature: EventSignature(123456789))"
+```
+
+**Requires the `async` feature.** Summaries are emitted as structured WARN-level tracing events with fields:
+- `signature` - The event signature hash
+- `count` - Number of suppressions since last emission or reset
+
+### Metrics API
+
+Monitor rate limiting behavior programmatically with built-in metrics:
 
 ```rust
 use tracing_throttle::{TracingRateLimitLayer, Policy};
@@ -314,7 +338,10 @@ cargo run --example policies
 - Cancellation safety documentation
 
 ### v0.2.0 (Enhanced Observability)
-- Active suppression summary emission
+✅ **Completed:**
+- Active suppression summary emission (automatic WARN-level emission of suppression statistics)
+
+🚧 **In Progress:**
 - Metrics adapters (Prometheus/OTel)
 - Configurable summary formatting
 - Memory usage telemetry

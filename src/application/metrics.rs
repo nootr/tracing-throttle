@@ -1,6 +1,62 @@
 //! Observability metrics for rate limiting.
 //!
 //! Provides metrics about rate limiting behavior for monitoring and debugging.
+//!
+//! ## Integration with Prometheus
+//!
+//! ```rust,ignore
+//! use prometheus::{IntCounter, Registry};
+//! use tracing_throttle::TracingRateLimitLayer;
+//!
+//! // Create Prometheus metrics
+//! let registry = Registry::new();
+//! let allowed = IntCounter::new("tracing_events_allowed", "Events allowed through").unwrap();
+//! let suppressed = IntCounter::new("tracing_events_suppressed", "Events suppressed").unwrap();
+//! let evicted = IntCounter::new("tracing_signatures_evicted", "Signatures evicted").unwrap();
+//!
+//! registry.register(Box::new(allowed.clone())).unwrap();
+//! registry.register(Box::new(suppressed.clone())).unwrap();
+//! registry.register(Box::new(evicted.clone())).unwrap();
+//!
+//! let layer = TracingRateLimitLayer::new();
+//!
+//! // Periodically export metrics
+//! std::thread::spawn(move || {
+//!     loop {
+//!         std::thread::sleep(std::time::Duration::from_secs(60));
+//!         let snapshot = layer.metrics().snapshot();
+//!         allowed.inc_by(snapshot.events_allowed);
+//!         suppressed.inc_by(snapshot.events_suppressed);
+//!         evicted.inc_by(snapshot.signatures_evicted);
+//!     }
+//! });
+//! ```
+//!
+//! ## Integration with OpenTelemetry
+//!
+//! ```rust,ignore
+//! use opentelemetry::{global, KeyValue};
+//! use opentelemetry::metrics::{Counter, Meter};
+//! use tracing_throttle::TracingRateLimitLayer;
+//!
+//! let meter = global::meter("tracing-throttle");
+//! let allowed = meter.u64_counter("tracing.events.allowed").init();
+//! let suppressed = meter.u64_counter("tracing.events.suppressed").init();
+//! let evicted = meter.u64_counter("tracing.signatures.evicted").init();
+//!
+//! let layer = TracingRateLimitLayer::new();
+//!
+//! // Periodically export metrics
+//! std::thread::spawn(move || {
+//!     loop {
+//!         std::thread::sleep(std::time::Duration::from_secs(60));
+//!         let snapshot = layer.metrics().snapshot();
+//!         allowed.add(snapshot.events_allowed, &[]);
+//!         suppressed.add(snapshot.events_suppressed, &[]);
+//!         evicted.add(snapshot.signatures_evicted, &[]);
+//!     }
+//! });
+//! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

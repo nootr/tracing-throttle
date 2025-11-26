@@ -205,10 +205,7 @@ cargo run --example policies
 ✅ **Completed:**
 - Active suppression summary emission (automatic WARN-level emission of suppression statistics)
 - Configurable summary formatting (custom formatters for log level, fields, and message format)
-
-🚧 **In Progress:**
-- Metrics adapters (Prometheus/OTel)
-- Memory usage telemetry
+- Metrics integration examples (Prometheus/OpenTelemetry integration patterns documented)
 
 ### v0.3.0 (Advanced Features)
 - Pluggable storage backends (Redis, etc.)

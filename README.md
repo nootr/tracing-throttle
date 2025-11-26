@@ -1,32 +1,60 @@
-# tracing-throttle
+# 🎛️ tracing-throttle
 
 [![Crates.io](https://img.shields.io/crates/v/tracing-throttle.svg)](https://crates.io/crates/tracing-throttle)
 [![Documentation](https://docs.rs/tracing-throttle/badge.svg)](https://docs.rs/tracing-throttle)
+[![Test](https://github.com/nootr/tracing-throttle/workflows/Test/badge.svg)](https://github.com/nootr/tracing-throttle/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 High-performance log deduplication and rate limiting for the Rust `tracing` ecosystem.
 
-## Overview
+## Introduction
 
-`tracing-throttle` suppresses repetitive or bursty log events in high-volume systems. It helps you:
+High-volume Rust applications often suffer from repetitive or bursty log events that overwhelm logging infrastructure. A single error condition can generate thousands of identical log messages per second, causing:
 
-- **Reduce I/O bandwidth** from repetitive logs
-- **Improve log visibility** by filtering noise
-- **Lower storage costs** for log aggregation
-- **Prevent log backend overload** during traffic spikes
+- **Infrastructure overload**: Log collectors and storage systems struggle under the load
+- **Cost explosion**: Cloud logging services charge per event or storage volume
+- **Signal loss**: Important logs get buried in noise
+- **Observability gaps**: Rate limiting at the collector level discards logs silently
 
-The crate provides a `tracing::Layer` that deduplicates events based on their signature (level, message, and structured fields) and applies configurable rate limiting policies.
+`tracing-throttle` solves this at the source by providing **signature-based rate limiting** as a drop-in `tracing::Layer`. Events with identical signatures (level, message, and fields) are deduplicated and throttled together, while unique events pass through unaffected.
 
-## Features
+### Why tracing-throttle?
 
-- 🚀 **High Performance**: Sharded maps and lock-free operations
-- 🎯 **Flexible Policies**: Token bucket, time-window, count-based, exponential backoff, and custom policies
-- 📊 **Per-signature Throttling**: Events with identical signatures are throttled together
-- 💾 **Memory Control**: Optional LRU eviction to prevent unbounded memory growth
-- 📈 **Observability Metrics**: Built-in tracking of allowed, suppressed, and evicted events
-- 🛡️ **Fail-Safe Circuit Breaker**: Fails open to preserve observability during errors
-- ⏱️ **Suppression Summaries**: Periodic emission of suppression statistics (coming in v0.2)
-- 🔧 **Easy Integration**: Drop-in `tracing::Layer` compatible with existing subscribers
+- **🚀 High Performance**: Lock-free operations and sharded storage handle 20M+ ops/sec
+- **🎯 Smart Deduplication**: Per-signature throttling means different errors are limited independently
+- **🔧 Zero Config**: Sensible defaults work out of the box, extensive customization available
+- **📊 Full Visibility**: Built-in metrics track what's being suppressed and why
+- **🛡️ Production Safe**: Circuit breaker fails open to preserve observability during errors
+- **💾 Memory Bounded**: LRU eviction prevents unbounded growth in high-cardinality scenarios
+
+### How It Works
+
+The layer computes a signature for each log event based on its level, message template, target, and structured fields. Each unique signature gets its own rate limiter that applies your chosen policy (token bucket, time-window, count-based, etc.). This means:
+
+- Identical errors are throttled together
+- Different errors are limited independently
+- Dynamic fields in messages don't break deduplication
+- Per-signature statistics enable targeted investigation
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Rate Limiting Policies](#rate-limiting-policies)
+  - [Token Bucket Policy (Default)](#token-bucket-policy-default)
+  - [Time-Window Policy](#time-window-policy)
+  - [Count-Based Policy](#count-based-policy)
+  - [Exponential Backoff Policy](#exponential-backoff-policy)
+  - [Custom Policies](#custom-policies)
+- [Observability & Metrics](#observability--metrics)
+- [Fail-Safe Operation](#fail-safe-operation)
+- [Memory Management](#memory-management)
+- [Performance](#performance)
+- [Examples](#examples)
+- [Roadmap](#roadmap)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Installation
 

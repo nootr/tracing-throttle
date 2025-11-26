@@ -18,6 +18,10 @@ pub enum PolicyError {
     ZeroMaxEvents,
     /// Time window duration must be greater than zero
     ZeroWindowDuration,
+    /// Bucket capacity must be greater than zero
+    ZeroCapacity,
+    /// Refill rate must be greater than zero
+    ZeroRefillRate,
 }
 
 impl std::fmt::Display for PolicyError {
@@ -26,6 +30,8 @@ impl std::fmt::Display for PolicyError {
             PolicyError::ZeroMaxCount => write!(f, "max_count must be greater than 0"),
             PolicyError::ZeroMaxEvents => write!(f, "max_events must be greater than 0"),
             PolicyError::ZeroWindowDuration => write!(f, "window duration must be greater than 0"),
+            PolicyError::ZeroCapacity => write!(f, "capacity must be greater than 0"),
+            PolicyError::ZeroRefillRate => write!(f, "refill_rate must be greater than 0"),
         }
     }
 }
@@ -265,6 +271,129 @@ impl RateLimitPolicy for ExponentialBackoffPolicy {
     }
 }
 
+/// Token bucket rate limiting policy.
+///
+/// Implements a token bucket algorithm where:
+/// - The bucket holds up to `capacity` tokens
+/// - Tokens refill at a constant rate (`refill_rate` tokens per second)
+/// - Each event consumes 1 token
+/// - Events are suppressed when no tokens are available
+///
+/// This policy provides:
+/// - **Burst tolerance**: Can handle bursts up to `capacity` events
+/// - **Natural recovery**: Tokens automatically refill over time
+/// - **Smooth rate limiting**: Sustained load is limited to `refill_rate`
+/// - **Forgiveness**: After quiet periods, full capacity is restored
+///
+/// # Example
+/// ```
+/// use tracing_throttle::{TokenBucketPolicy, RateLimitPolicy};
+/// use std::time::{Duration, Instant};
+///
+/// // Bucket with capacity 100, refills at 10 tokens/sec
+/// let mut policy = TokenBucketPolicy::new(100.0, 10.0).unwrap();
+/// let start = Instant::now();
+///
+/// // Can burst up to 100 events immediately
+/// for _ in 0..100 {
+///     assert!(policy.register_event(start).is_allow());
+/// }
+///
+/// // 101st event is suppressed (no tokens left)
+/// assert!(policy.register_event(start).is_suppress());
+///
+/// // After 1 second, 10 more tokens available
+/// let later = start + Duration::from_secs(1);
+/// for _ in 0..10 {
+///     assert!(policy.register_event(later).is_allow());
+/// }
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenBucketPolicy {
+    /// Maximum number of tokens the bucket can hold
+    capacity: f64,
+    /// Rate at which tokens are added (tokens per second)
+    refill_rate: f64,
+    /// Current number of tokens in the bucket
+    tokens: f64,
+    /// Last time the bucket was refilled
+    last_refill: Option<Instant>,
+}
+
+impl TokenBucketPolicy {
+    /// Create a new token bucket policy.
+    ///
+    /// # Arguments
+    /// * `capacity` - Maximum tokens in the bucket (burst size, must be > 0)
+    /// * `refill_rate` - Tokens added per second (sustained rate, must be > 0)
+    ///
+    /// # Errors
+    /// Returns `PolicyError::ZeroCapacity` if `capacity` is 0 or negative.
+    /// Returns `PolicyError::ZeroRefillRate` if `refill_rate` is 0 or negative.
+    ///
+    /// # Example
+    /// ```
+    /// use tracing_throttle::TokenBucketPolicy;
+    ///
+    /// // 100 token burst, refills at 10/sec
+    /// let policy = TokenBucketPolicy::new(100.0, 10.0).unwrap();
+    /// ```
+    pub fn new(capacity: f64, refill_rate: f64) -> Result<Self, PolicyError> {
+        if capacity <= 0.0 {
+            return Err(PolicyError::ZeroCapacity);
+        }
+        if refill_rate <= 0.0 {
+            return Err(PolicyError::ZeroRefillRate);
+        }
+
+        Ok(Self {
+            capacity,
+            refill_rate,
+            tokens: capacity,
+            last_refill: None,
+        })
+    }
+
+    /// Refill tokens based on elapsed time since last refill.
+    ///
+    /// Handles clock adjustments gracefully - if time goes backwards,
+    /// we simply reset the refill timestamp without adding tokens.
+    fn refill(&mut self, now: Instant) {
+        if let Some(last) = self.last_refill {
+            // Handle time going backwards (NTP adjustments, VM migrations, etc.)
+            if now < last {
+                self.last_refill = Some(now);
+                return;
+            }
+
+            let elapsed = now.duration_since(last).as_secs_f64();
+            let new_tokens = elapsed * self.refill_rate;
+            self.tokens = (self.tokens + new_tokens).min(self.capacity);
+        }
+        self.last_refill = Some(now);
+    }
+}
+
+impl RateLimitPolicy for TokenBucketPolicy {
+    fn register_event(&mut self, timestamp: Instant) -> PolicyDecision {
+        // Refill tokens based on time elapsed
+        self.refill(timestamp);
+
+        // Check if we have a token available
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            PolicyDecision::Allow
+        } else {
+            PolicyDecision::Suppress
+        }
+    }
+
+    fn reset(&mut self) {
+        self.tokens = self.capacity;
+        self.last_refill = None;
+    }
+}
+
 /// Convenience enum for common policy types.
 #[derive(Debug, Clone)]
 pub enum Policy {
@@ -274,6 +403,8 @@ pub enum Policy {
     TimeWindow(TimeWindowPolicy),
     /// Exponential backoff policy
     ExponentialBackoff(ExponentialBackoffPolicy),
+    /// Token bucket policy
+    TokenBucket(TokenBucketPolicy),
 }
 
 impl Policy {
@@ -302,6 +433,30 @@ impl Policy {
     pub fn exponential_backoff() -> Self {
         Policy::ExponentialBackoff(ExponentialBackoffPolicy::new())
     }
+
+    /// Create a token bucket policy.
+    ///
+    /// # Arguments
+    /// * `capacity` - Maximum tokens (burst size, must be > 0)
+    /// * `refill_rate` - Tokens per second (sustained rate, must be > 0)
+    ///
+    /// # Errors
+    /// Returns `PolicyError::ZeroCapacity` if `capacity` is 0 or negative.
+    /// Returns `PolicyError::ZeroRefillRate` if `refill_rate` is 0 or negative.
+    ///
+    /// # Example
+    /// ```
+    /// use tracing_throttle::Policy;
+    ///
+    /// // Allow bursts of 100, refill at 10/sec
+    /// let policy = Policy::token_bucket(100.0, 10.0).unwrap();
+    /// ```
+    pub fn token_bucket(capacity: f64, refill_rate: f64) -> Result<Self, PolicyError> {
+        Ok(Policy::TokenBucket(TokenBucketPolicy::new(
+            capacity,
+            refill_rate,
+        )?))
+    }
 }
 
 impl RateLimitPolicy for Policy {
@@ -310,6 +465,7 @@ impl RateLimitPolicy for Policy {
             Policy::CountBased(p) => p.register_event(timestamp),
             Policy::TimeWindow(p) => p.register_event(timestamp),
             Policy::ExponentialBackoff(p) => p.register_event(timestamp),
+            Policy::TokenBucket(p) => p.register_event(timestamp),
         }
     }
 
@@ -318,6 +474,7 @@ impl RateLimitPolicy for Policy {
             Policy::CountBased(p) => p.reset(),
             Policy::TimeWindow(p) => p.reset(),
             Policy::ExponentialBackoff(p) => p.reset(),
+            Policy::TokenBucket(p) => p.reset(),
         }
     }
 }
@@ -522,5 +679,354 @@ mod tests {
         // Reset should start over
         policy.reset();
         assert_eq!(policy.register_event(now), PolicyDecision::Allow); // 1st again
+    }
+
+    // Token Bucket Policy Tests
+    #[test]
+    fn test_token_bucket_basic_consumption() {
+        let mut policy = TokenBucketPolicy::new(3.0, 1.0).unwrap();
+        let now = Instant::now();
+
+        // Should allow up to capacity
+        assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        // Bucket empty, should suppress
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_refill_over_time() {
+        let mut policy = TokenBucketPolicy::new(10.0, 10.0).unwrap(); // 10 tokens/sec
+        let now = Instant::now();
+
+        // Use all tokens
+        for _ in 0..10 {
+            assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        }
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+
+        // Wait 0.5 seconds - should get 5 tokens back
+        let later = now + Duration::from_millis(500);
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(later),
+                PolicyDecision::Allow,
+                "Event {} should be allowed after refill",
+                i
+            );
+        }
+        assert_eq!(policy.register_event(later), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_burst_tolerance() {
+        let mut policy = TokenBucketPolicy::new(100.0, 1.0).unwrap();
+        let now = Instant::now();
+
+        // Can burst up to full capacity immediately
+        for i in 0..100 {
+            assert_eq!(
+                policy.register_event(now),
+                PolicyDecision::Allow,
+                "Event {} in burst should be allowed",
+                i
+            );
+        }
+        // Then rate limited
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_sustained_rate() {
+        let mut policy = TokenBucketPolicy::new(10.0, 10.0).unwrap(); // 10/sec sustained, 10 capacity
+        let now = Instant::now();
+
+        // Use all tokens
+        for _ in 0..10 {
+            assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        }
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+
+        // Wait 1 second - should get 10 tokens back (capped at capacity)
+        let later = now + Duration::from_secs(1);
+        for i in 0..10 {
+            assert_eq!(
+                policy.register_event(later),
+                PolicyDecision::Allow,
+                "Event {} after 1s should be allowed",
+                i
+            );
+        }
+        assert_eq!(policy.register_event(later), PolicyDecision::Suppress);
+
+        // Wait 0.5 seconds - should get 5 tokens
+        let even_later = later + Duration::from_millis(500);
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(even_later),
+                PolicyDecision::Allow,
+                "Event {} after 0.5s should be allowed",
+                i
+            );
+        }
+        assert_eq!(policy.register_event(even_later), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_recovery_after_quiet() {
+        let mut policy = TokenBucketPolicy::new(5.0, 2.0).unwrap();
+        let now = Instant::now();
+
+        // Use all tokens
+        for _ in 0..5 {
+            policy.register_event(now);
+        }
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+
+        // Wait long enough to fully recover
+        let much_later = now + Duration::from_secs(10);
+        // Should be back to full capacity (5 tokens)
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(much_later),
+                PolicyDecision::Allow,
+                "Event {} after recovery should be allowed",
+                i
+            );
+        }
+        assert_eq!(policy.register_event(much_later), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_fractional_refill() {
+        let mut policy = TokenBucketPolicy::new(10.0, 0.5).unwrap(); // 0.5 tokens/sec
+        let now = Instant::now();
+
+        // Use all tokens
+        for _ in 0..10 {
+            policy.register_event(now);
+        }
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+
+        // Wait 3 seconds - should get 1.5 tokens (only 1 usable)
+        let later = now + Duration::from_secs(3);
+        assert_eq!(policy.register_event(later), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(later), PolicyDecision::Suppress); // 0.5 tokens left, not enough
+
+        // Wait 1 more second - should have 1.5 tokens now
+        let even_later = later + Duration::from_secs(1);
+        assert_eq!(policy.register_event(even_later), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(even_later), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_reset() {
+        let mut policy = TokenBucketPolicy::new(5.0, 1.0).unwrap();
+        let now = Instant::now();
+
+        // Use all tokens
+        for _ in 0..5 {
+            policy.register_event(now);
+        }
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+
+        // Reset should restore full capacity
+        policy.reset();
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(now),
+                PolicyDecision::Allow,
+                "Event {} after reset should be allowed",
+                i
+            );
+        }
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_capacity_cap() {
+        let mut policy = TokenBucketPolicy::new(5.0, 10.0).unwrap();
+        let now = Instant::now();
+
+        // Use some tokens
+        for _ in 0..3 {
+            policy.register_event(now);
+        }
+
+        // Wait long time - tokens should cap at capacity (5), not grow unbounded
+        let much_later = now + Duration::from_secs(100);
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(much_later),
+                PolicyDecision::Allow,
+                "Event {} should be allowed (capped at capacity)",
+                i
+            );
+        }
+        assert_eq!(policy.register_event(much_later), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_zero_capacity() {
+        let result = TokenBucketPolicy::new(0.0, 1.0);
+        assert_eq!(result, Err(PolicyError::ZeroCapacity));
+    }
+
+    #[test]
+    fn test_token_bucket_negative_capacity() {
+        let result = TokenBucketPolicy::new(-5.0, 1.0);
+        assert_eq!(result, Err(PolicyError::ZeroCapacity));
+    }
+
+    #[test]
+    fn test_token_bucket_zero_refill_rate() {
+        let result = TokenBucketPolicy::new(10.0, 0.0);
+        assert_eq!(result, Err(PolicyError::ZeroRefillRate));
+    }
+
+    #[test]
+    fn test_token_bucket_negative_refill_rate() {
+        let result = TokenBucketPolicy::new(10.0, -2.0);
+        assert_eq!(result, Err(PolicyError::ZeroRefillRate));
+    }
+
+    #[test]
+    fn test_token_bucket_policy_enum() {
+        let mut policy = Policy::token_bucket(5.0, 2.0).unwrap();
+        let now = Instant::now();
+
+        // Test via Policy enum
+        for i in 0..5 {
+            assert!(
+                policy.register_event(now).is_allow(),
+                "Event {} should be allowed",
+                i
+            );
+        }
+        assert!(policy.register_event(now).is_suppress());
+
+        // Test reset via enum
+        policy.reset();
+        assert!(policy.register_event(now).is_allow());
+    }
+
+    #[test]
+    fn test_token_bucket_incremental_refill() {
+        let mut policy = TokenBucketPolicy::new(1.0, 10.0).unwrap(); // 10 tokens/sec, 1 max
+        let now = Instant::now();
+
+        // Use initial token
+        assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(now), PolicyDecision::Suppress);
+
+        // Incremental refills - 100ms = 1 token
+        let t1 = now + Duration::from_millis(100);
+        assert_eq!(policy.register_event(t1), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(t1), PolicyDecision::Suppress);
+
+        let t2 = t1 + Duration::from_millis(100);
+        assert_eq!(policy.register_event(t2), PolicyDecision::Allow);
+        assert_eq!(policy.register_event(t2), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_same_timestamp_multiple_events() {
+        // Regression test: multiple events at the same timestamp should not refill
+        let mut policy = TokenBucketPolicy::new(5.0, 2.0).unwrap();
+        let start = Instant::now();
+
+        // First burst at t=0: use all 5 tokens
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(start),
+                PolicyDecision::Allow,
+                "Event {} should be allowed",
+                i
+            );
+        }
+
+        // Events 6,7,8 at t=0 should be suppressed (no tokens left)
+        for i in 5..8 {
+            assert_eq!(
+                policy.register_event(start),
+                PolicyDecision::Suppress,
+                "Event {} should be suppressed (no tokens)",
+                i
+            );
+        }
+
+        // After 1 second, should have refilled 2 tokens
+        let t1 = start + Duration::from_secs(1);
+
+        // Events at t=1s: should allow exactly 2
+        assert_eq!(
+            policy.register_event(t1),
+            PolicyDecision::Allow,
+            "First event after 1s should be allowed"
+        );
+        assert_eq!(
+            policy.register_event(t1),
+            PolicyDecision::Allow,
+            "Second event after 1s should be allowed"
+        );
+
+        // Third event at t=1s should be suppressed (only refilled 2 tokens)
+        assert_eq!(
+            policy.register_event(t1),
+            PolicyDecision::Suppress,
+            "Third event after 1s should be suppressed (only 2 tokens refilled)"
+        );
+
+        // Fourth and fifth should also be suppressed
+        assert_eq!(policy.register_event(t1), PolicyDecision::Suppress);
+        assert_eq!(policy.register_event(t1), PolicyDecision::Suppress);
+    }
+
+    #[test]
+    fn test_token_bucket_time_goes_backwards() {
+        let mut policy = TokenBucketPolicy::new(10.0, 5.0).unwrap();
+        let now = Instant::now();
+
+        // Use 5 tokens
+        for _ in 0..5 {
+            assert_eq!(policy.register_event(now), PolicyDecision::Allow);
+        }
+        // 5 tokens remaining
+
+        // Time goes forward - should refill 5 tokens (now have 10)
+        let future = now + Duration::from_secs(1);
+        for _ in 0..10 {
+            assert_eq!(policy.register_event(future), PolicyDecision::Allow);
+        }
+        // 0 tokens remaining after using all 10
+
+        // Time goes backwards (NTP correction, VM migration, etc.)
+        // Should NOT panic and should NOT add/remove tokens
+        let past = now + Duration::from_millis(500);
+        assert!(past < future, "Test setup: past must be before future");
+
+        // Should still have 0 tokens (time went backwards, no refill)
+        assert_eq!(
+            policy.register_event(past),
+            PolicyDecision::Suppress,
+            "Should suppress when no tokens available after time went backwards"
+        );
+
+        // Time moves forward again normally (1 second after 'past')
+        let future2 = past + Duration::from_secs(1);
+        // Should refill 5 tokens based on elapsed time from 'past'
+        for i in 0..5 {
+            assert_eq!(
+                policy.register_event(future2),
+                PolicyDecision::Allow,
+                "Token {} should be available after normal time progression",
+                i
+            );
+        }
+
+        // 6th should be suppressed
+        assert_eq!(policy.register_event(future2), PolicyDecision::Suppress);
     }
 }

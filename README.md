@@ -20,7 +20,7 @@ The crate provides a `tracing::Layer` that deduplicates events based on their si
 ## Features
 
 - 🚀 **High Performance**: Sharded maps and lock-free operations
-- 🎯 **Flexible Policies**: Count-based, time-window, exponential backoff, and custom policies
+- 🎯 **Flexible Policies**: Token bucket, time-window, count-based, exponential backoff, and custom policies
 - 📊 **Per-signature Throttling**: Events with identical signatures are throttled together
 - 💾 **Memory Control**: Optional LRU eviction to prevent unbounded memory growth
 - 📈 **Observability Metrics**: Built-in tracking of allowed, suppressed, and evicted events
@@ -46,7 +46,7 @@ use tracing_throttle::TracingRateLimitLayer;
 use tracing_subscriber::prelude::*;
 
 // Create a rate limit filter with safe defaults
-// Defaults: 100 events per signature, 10k max signatures with LRU eviction and a 30 second summary interval.
+// Defaults: 50 burst capacity, 1 token/sec (60/min), 10k max signatures with LRU eviction.
 let rate_limit = TracingRateLimitLayer::new();
 
 // Add it as a filter to your fmt layer
@@ -58,21 +58,39 @@ tracing_subscriber::registry()
 for i in 0..1000 {
     tracing::info!("Processing item {}", i);
 }
-// Only the first 100 will be emitted
+// First 50 emitted immediately (burst), then 1/sec (60/min) sustained rate
 ```
 
 ## Rate Limiting Policies
 
-### Count-Based Policy
+### Token Bucket Policy (Default)
 
-Allow N events, then suppress all subsequent occurrences:
+Best choice for intermittent issues - allows bursts but recovers naturally:
 
 ```rust
 use tracing_throttle::Policy;
 
-let policy = Policy::count_based(50).expect("max_count must be > 0");
-// Allows first 50 events, suppresses the rest
+// Default: moderate rate limiting (50 burst, 60/min sustained)
+let policy = Policy::token_bucket(50.0, 1.0)
+    .expect("capacity and refill_rate must be > 0");
+
+// High-volume applications: increase limits
+let high_volume = Policy::token_bucket(100.0, 10.0).unwrap();
+// Allows bursts of up to 100 events
+// Refills at 10 tokens/second (sustained rate: 600/min)
 ```
+
+**Benefits:**
+- **Burst tolerance**: Handle spikes up to capacity
+- **Natural recovery**: Tokens refill over time - issues that settle down return to normal
+- **Smooth rate limiting**: No hard cutoffs
+- **Forgiveness**: Intermittent problems don't permanently suppress logs
+- **Industry standard**: Same algorithm used by AWS, GCP, Kubernetes
+
+**Typical configurations:**
+- **Default (50, 1.0)**: 3,600 events/hour max - good for most applications
+- **High-volume (100, 10.0)**: 36,000 events/hour max - for high-throughput systems
+- **Strict (20, 0.5)**: 1,800 events/hour max - for aggressive rate limiting
 
 ### Time-Window Policy
 
@@ -85,6 +103,19 @@ use tracing_throttle::Policy;
 let policy = Policy::time_window(10, Duration::from_secs(60))
     .expect("max_events and window must be > 0");
 // Allows 10 events per minute
+// Window naturally resets as time passes
+```
+
+### Count-Based Policy
+
+Allow N events, then suppress all subsequent occurrences:
+
+```rust
+use tracing_throttle::Policy;
+
+let policy = Policy::count_based(50).expect("max_count must be > 0");
+// Allows first 50 events, suppresses the rest
+// ⚠️ No recovery mechanism - once limit hit, suppressed forever
 ```
 
 ### Exponential Backoff Policy
@@ -271,6 +302,24 @@ cargo run --example policies
 - Production-ready documentation
 - Optional WASM support
 - Performance regression testing
+
+## Development
+
+### Setting Up Git Hooks
+
+This project includes pre-commit hooks that run formatting, linting, tests, and example builds. To enable them:
+
+```bash
+# One-time setup - configure Git to use the .githooks directory
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook will automatically run:
+- `cargo fmt --check` - Verify code formatting
+- `cargo clippy --all-features --all-targets` - Run lints
+- `cargo test --all-features` - Run all tests
+- `cargo build --examples` - Build examples
+- Quick smoke test of examples
 
 ## Contributing
 

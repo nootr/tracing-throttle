@@ -14,12 +14,12 @@
 //! use tracing_subscriber::prelude::*;
 //! use std::time::Duration;
 //!
-//! // Use sensible defaults: 100 events, 10k signature limit
+//! // Use sensible defaults: 50 burst capacity, 1 token/sec (60/min), 10k signature limit
 //! let rate_limit = TracingRateLimitLayer::new();
 //!
-//! // Or customize:
+//! // Or customize for high-volume applications:
 //! let rate_limit = TracingRateLimitLayer::builder()
-//!     .with_policy(Policy::count_based(100).unwrap())
+//!     .with_policy(Policy::token_bucket(100.0, 10.0).unwrap())  // 100 burst, 600/min
 //!     .with_max_signatures(50_000)  // Custom limit
 //!     .with_summary_interval(Duration::from_secs(30))
 //!     .build()
@@ -33,8 +33,9 @@
 //!
 //! ## Features
 //!
-//! - **Count-based limiting**: Allow N events, then suppress the rest
-//! - **Time-window limiting**: Allow K events per time period
+//! - **Token bucket limiting**: Burst tolerance with smooth recovery (recommended default)
+//! - **Time-window limiting**: Allow K events per time period with natural reset
+//! - **Count-based limiting**: Allow N events, then suppress the rest (no recovery)
 //! - **Exponential backoff**: Emit at exponentially increasing intervals (1st, 2nd, 4th, 8th...)
 //! - **Custom policies**: Implement your own rate limiting logic
 //! - **Per-signature throttling**: Different messages are throttled independently
@@ -267,7 +268,7 @@ pub mod infrastructure;
 pub use domain::{
     policy::{
         CountBasedPolicy, ExponentialBackoffPolicy, Policy, PolicyDecision, PolicyError,
-        RateLimitPolicy, TimeWindowPolicy,
+        RateLimitPolicy, TimeWindowPolicy, TokenBucketPolicy,
     },
     signature::EventSignature,
     summary::{SuppressionCounter, SuppressionSummary},

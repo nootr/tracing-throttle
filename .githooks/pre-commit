@@ -1,0 +1,44 @@
+#!/bin/bash
+# Pre-commit hook for tracing-throttle
+# Runs linting, clippy, tests, and builds examples before allowing commit
+
+set -e  # Exit on first error
+
+echo "Running pre-commit checks..."
+
+# 1. Format check
+echo "→ Checking formatting..."
+if ! cargo fmt -- --check; then
+    echo "❌ Code formatting failed. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# 2. Clippy (linting)
+echo "→ Running clippy..."
+if ! cargo clippy --all-features --all-targets -- -D warnings; then
+    echo "❌ Clippy found issues. Fix warnings before committing."
+    exit 1
+fi
+
+# 3. Tests
+echo "→ Running tests..."
+if ! cargo test --all-features; then
+    echo "❌ Tests failed. Fix failing tests before committing."
+    exit 1
+fi
+
+# 4. Build examples
+echo "→ Building examples..."
+if ! cargo build --examples; then
+    echo "❌ Example builds failed."
+    exit 1
+fi
+
+# 5. Check that examples run (quick smoke test)
+echo "→ Smoke testing examples..."
+if ! timeout 5 cargo run --example basic > /dev/null 2>&1; then
+    echo "⚠️  Warning: basic example may have issues (timed out or failed)"
+    # Don't fail the commit for this, just warn
+fi
+
+echo "✅ All pre-commit checks passed!"

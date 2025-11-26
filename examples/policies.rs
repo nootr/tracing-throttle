@@ -1,14 +1,62 @@
 //! Example demonstrating different rate limiting policies.
 //!
 //! This example shows how to use various built-in policies:
-//! - Count-based: Allow N events then suppress
+//! - Token bucket: Burst tolerance with natural recovery (recommended)
 //! - Time-window: Allow K events per time period
+//! - Count-based: Allow N events then suppress
 //! - Exponential backoff: Allow 1st, 2nd, 4th, 8th, etc.
 
 use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::prelude::*;
 use tracing_throttle::{Policy, TracingRateLimitLayer};
+
+// Helper function to log events - ensures all events have the same signature (same source location)
+fn log_event(iteration: i32) {
+    info!(iteration = iteration, "Token bucket test message");
+}
+
+fn demonstrate_token_bucket() {
+    println!("\n=== Token Bucket Policy (Recommended) ===");
+    println!("Allow bursts of 5, refill at 2 tokens/sec\n");
+
+    let layer = TracingRateLimitLayer::builder()
+        .with_policy(Policy::token_bucket(5.0, 2.0).unwrap())
+        .build()
+        .unwrap();
+
+    let subscriber =
+        tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(layer));
+
+    tracing::subscriber::with_default(subscriber, || {
+        // First burst - 8 events immediately (only 5 allowed)
+        println!("First burst (8 events immediately):");
+        for i in 1..=8 {
+            log_event(i);
+        }
+        println!("  (Expected: 5 allowed, 3 suppressed)");
+
+        // Wait 1 second - should refill 2 tokens
+        std::thread::sleep(Duration::from_secs(1));
+
+        // Second burst - should allow 2 more
+        println!("\nSecond burst after 1 second (5 more events):");
+        for i in 9..=13 {
+            log_event(i);
+        }
+        println!("  (Expected: 2 allowed, 3 suppressed)");
+
+        // Wait 3 seconds - should refill to full capacity (need 5 tokens at 2/sec = 2.5s minimum)
+        std::thread::sleep(Duration::from_secs(3));
+
+        // Third burst - should allow 5 more (full capacity restored)
+        println!("\nThird burst after 3 more seconds (5 more events):");
+        for i in 14..=18 {
+            log_event(i);
+        }
+        println!("  (Expected: 5 allowed, full capacity restored)");
+    });
+}
 
 fn demonstrate_count_based() {
     println!("\n=== Count-Based Policy ===");
@@ -82,8 +130,9 @@ fn demonstrate_exponential_backoff() {
 fn main() {
     println!("=== Built-in Policy Examples ===");
 
-    demonstrate_count_based();
+    demonstrate_token_bucket();
     demonstrate_time_window();
+    demonstrate_count_based();
     demonstrate_exponential_backoff();
 
     println!("\n=== Examples Complete ===");

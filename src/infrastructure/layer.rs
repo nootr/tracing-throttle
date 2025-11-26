@@ -215,13 +215,13 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
     /// Create a builder for configuring the layer.
     ///
     /// Defaults:
-    /// - Policy: count-based (100 events)
+    /// - Policy: token bucket (50 burst capacity, 1 token/sec refill rate)
     /// - Max signatures: 10,000 (with LRU eviction)
     /// - Summary interval: 30 seconds
     pub fn builder() -> TracingRateLimitLayerBuilder {
         TracingRateLimitLayerBuilder {
-            // Safe unwrap: 100 > 0 is always valid
-            policy: Policy::count_based(100).expect("default policy with 100 > 0 is always valid"),
+            policy: Policy::token_bucket(50.0, 1.0)
+                .expect("default policy with 50 capacity and 1/sec refill is always valid"),
             summary_interval: Duration::from_secs(30),
             clock: None,
             max_signatures: Some(10_000),
@@ -233,7 +233,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
     /// Equivalent to `TracingRateLimitLayer::builder().build().unwrap()`.
     ///
     /// Defaults:
-    /// - Policy: count-based (100 events)
+    /// - Policy: token bucket (50 burst capacity, 1 token/sec refill rate = 60/min)
     /// - Max signatures: 10,000 (with LRU eviction)
     /// - Summary interval: 30 seconds
     ///

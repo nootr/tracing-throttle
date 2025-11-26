@@ -61,60 +61,6 @@ for i in 0..1000 {
 // Only the first 100 will be emitted
 ```
 
-## Observability & Metrics
-
-Monitor rate limiting behavior with built-in metrics:
-
-```rust
-use tracing_throttle::{TracingRateLimitLayer, Policy};
-
-let rate_limit = TracingRateLimitLayer::builder()
-    .with_policy(Policy::count_based(100).expect("valid policy"))
-    .build()
-    .expect("valid config");
-
-// ... after some log events have been processed ...
-
-// Get current metrics
-let metrics = rate_limit.metrics();
-println!("Events allowed: {}", metrics.events_allowed());
-println!("Events suppressed: {}", metrics.events_suppressed());
-println!("Signatures evicted: {}", metrics.signatures_evicted());
-
-// Or get a snapshot for calculations
-let snapshot = metrics.snapshot();
-println!("Total events: {}", snapshot.total_events());
-println!("Suppression rate: {:.2}%", snapshot.suppression_rate() * 100.0);
-
-// Check how many unique signatures are being tracked
-println!("Tracked signatures: {}", rate_limit.signature_count());
-```
-
-**Available Metrics:**
-- `events_allowed()` - Total events allowed through
-- `events_suppressed()` - Total events suppressed
-- `signatures_evicted()` - Signatures removed due to LRU eviction
-- `signature_count()` - Current number of tracked signatures
-- `suppression_rate()` - Ratio of suppressed to total events (0.0 - 1.0)
-
-**Use Cases:**
-- Monitor suppression rates in production dashboards
-- Alert when suppression rate exceeds threshold
-- Track signature cardinality growth
-- Observe LRU eviction frequency
-- Validate rate limiting effectiveness
-
-## Fail-Safe Operation
-
-`tracing-throttle` uses a circuit breaker pattern to prevent cascading failures. If rate limiting operations fail (e.g., panics or internal errors), the library **fails open** to preserve observability:
-
-- **Closed**: Normal operation, rate limiting active
-- **Open**: After threshold failures (default: 5), fails open and allows all events
-- **HalfOpen**: After recovery timeout (default: 30s), tests if system has recovered
-- **Fail-Open Strategy**: Preserves observability over strict rate limiting
-
-This ensures your logs remain visible during system instability, preventing silent data loss.
-
 ## Rate Limiting Policies
 
 ### Count-Based Policy
@@ -172,6 +118,60 @@ impl RateLimitPolicy for MyCustomPolicy {
     }
 }
 ```
+
+## Observability & Metrics
+
+Monitor rate limiting behavior with built-in metrics:
+
+```rust
+use tracing_throttle::{TracingRateLimitLayer, Policy};
+
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_policy(Policy::count_based(100).expect("valid policy"))
+    .build()
+    .expect("valid config");
+
+// ... after some log events have been processed ...
+
+// Get current metrics
+let metrics = rate_limit.metrics();
+println!("Events allowed: {}", metrics.events_allowed());
+println!("Events suppressed: {}", metrics.events_suppressed());
+println!("Signatures evicted: {}", metrics.signatures_evicted());
+
+// Or get a snapshot for calculations
+let snapshot = metrics.snapshot();
+println!("Total events: {}", snapshot.total_events());
+println!("Suppression rate: {:.2}%", snapshot.suppression_rate() * 100.0);
+
+// Check how many unique signatures are being tracked
+println!("Tracked signatures: {}", rate_limit.signature_count());
+```
+
+**Available Metrics:**
+- `events_allowed()` - Total events allowed through
+- `events_suppressed()` - Total events suppressed
+- `signatures_evicted()` - Signatures removed due to LRU eviction
+- `signature_count()` - Current number of tracked signatures
+- `suppression_rate()` - Ratio of suppressed to total events (0.0 - 1.0)
+
+**Use Cases:**
+- Monitor suppression rates in production dashboards
+- Alert when suppression rate exceeds threshold
+- Track signature cardinality growth
+- Observe LRU eviction frequency
+- Validate rate limiting effectiveness
+
+## Fail-Safe Operation
+
+`tracing-throttle` uses a circuit breaker pattern to prevent cascading failures. If rate limiting operations fail (e.g., panics or internal errors), the library **fails open** to preserve observability:
+
+- **Closed**: Normal operation, rate limiting active
+- **Open**: After threshold failures (default: 5), fails open and allows all events
+- **HalfOpen**: After recovery timeout (default: 30s), tests if system has recovered
+- **Fail-Open Strategy**: Preserves observability over strict rate limiting
+
+This ensures your logs remain visible during system instability, preventing silent data loss.
 
 ## Memory Management
 

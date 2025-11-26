@@ -14,12 +14,14 @@ use crate::application::{
 use crate::domain::{policy::Policy, signature::EventSignature};
 use crate::infrastructure::clock::SystemClock;
 use crate::infrastructure::storage::ShardedStorage;
+use crate::infrastructure::visitor::FieldVisitor;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{Metadata, Subscriber};
 use tracing_subscriber::layer::Filter;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{layer::Context, Layer};
 
 #[cfg(feature = "async")]
@@ -77,6 +79,7 @@ pub struct TracingRateLimitLayerBuilder {
     enable_active_emission: bool,
     #[cfg(feature = "async")]
     summary_formatter: Option<SummaryFormatter>,
+    span_context_fields: Vec<String>,
 }
 
 impl TracingRateLimitLayerBuilder {
@@ -183,6 +186,50 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
+    /// Include span context fields in event signatures.
+    ///
+    /// When specified, the layer will extract these fields from the current span
+    /// context and include them in the event signature. This enables rate limiting
+    /// per-user, per-tenant, per-request, or any other span-level context.
+    ///
+    /// Duplicate field names are automatically removed, and empty field names are filtered out.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::TracingRateLimitLayer;
+    /// // Rate limit separately per user
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_span_context_fields(vec!["user_id".to_string()])
+    ///     .build()
+    ///     .unwrap();
+    ///
+    /// // Rate limit per user and tenant
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_span_context_fields(vec!["user_id".to_string(), "tenant_id".to_string()])
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// # Usage with Spans
+    ///
+    /// ```no_run
+    /// # use tracing::{info, info_span};
+    /// // Create a span with user context
+    /// let span = info_span!("request", user_id = "alice");
+    /// let _enter = span.enter();
+    ///
+    /// // These events will be rate limited separately per user
+    /// info!("Processing request");  // Limited for user "alice"
+    /// ```
+    pub fn with_span_context_fields(mut self, fields: Vec<String>) -> Self {
+        // Deduplicate and filter out empty field names
+        use std::collections::BTreeSet;
+        let unique_fields: BTreeSet<_> = fields.into_iter().filter(|f| !f.is_empty()).collect();
+        self.span_context_fields = unique_fields.into_iter().collect();
+        self
+    }
+
     /// Build the layer.
     ///
     /// # Errors
@@ -242,6 +289,7 @@ impl TracingRateLimitLayerBuilder {
 
         Ok(TracingRateLimitLayer {
             limiter,
+            span_context_fields: Arc::new(self.span_context_fields),
             #[cfg(feature = "async")]
             emitter_handle,
             #[cfg(not(feature = "async"))]
@@ -263,6 +311,7 @@ where
     S: Storage<EventSignature, EventState> + Clone,
 {
     limiter: RateLimiter<S>,
+    span_context_fields: Arc<Vec<String>>,
     #[cfg(feature = "async")]
     emitter_handle: Arc<Mutex<Option<EmitterHandle>>>,
     #[cfg(not(feature = "async"))]
@@ -273,23 +322,58 @@ impl<S> TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone,
 {
-    /// Compute event signature from tracing metadata and fields.
+    /// Extract span context fields from the current span.
+    fn extract_span_context<Sub>(&self, cx: &Context<'_, Sub>) -> BTreeMap<String, String>
+    where
+        Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        if self.span_context_fields.is_empty() {
+            return BTreeMap::new();
+        }
+
+        let mut context_fields = BTreeMap::new();
+
+        if let Some(span) = cx.lookup_current() {
+            for span_ref in span.scope() {
+                let extensions = span_ref.extensions();
+
+                if let Some(stored_fields) = extensions.get::<BTreeMap<String, String>>() {
+                    for field_name in self.span_context_fields.as_ref() {
+                        if !context_fields.contains_key(field_name) {
+                            if let Some(value) = stored_fields.get(field_name) {
+                                context_fields.insert(field_name.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+
+                if context_fields.len() == self.span_context_fields.len() {
+                    break;
+                }
+            }
+        }
+
+        context_fields
+    }
+
+    /// Compute event signature from tracing metadata and span context.
+    ///
+    /// The signature includes:
+    /// - Log level (INFO, WARN, ERROR, etc.)
+    /// - Message template
+    /// - Target module path
+    /// - Span context fields (if configured)
     fn compute_signature(
         &self,
         metadata: &Metadata,
-        _fields: &BTreeMap<String, String>,
+        span_context: &BTreeMap<String, String>,
     ) -> EventSignature {
-        // For MVP, we'll use a simple signature based on level and target
-        // In a full implementation, we'd extract and include field values
         let level = metadata.level().as_str();
         let message = metadata.name();
         let target = Some(metadata.target());
 
-        // TODO: Extract actual field values from the event
-        // For now, use empty fields map
-        let fields = BTreeMap::new();
-
-        EventSignature::new(level, message, &fields, target)
+        // Use span context fields directly in signature
+        EventSignature::new(level, message, span_context, target)
     }
 
     /// Check if an event should be allowed through.
@@ -387,6 +471,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             enable_active_emission: false,
             #[cfg(feature = "async")]
             summary_formatter: None,
+            span_context_fields: Vec::new(),
         }
     }
 
@@ -418,12 +503,12 @@ impl Default for TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventS
 impl<S, Sub> Filter<Sub> for TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone,
-    Sub: Subscriber,
+    Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    fn enabled(&self, meta: &Metadata<'_>, _cx: &Context<'_, Sub>) -> bool {
-        // Compute signature and check with rate limiter
-        let fields = BTreeMap::new();
-        let signature = self.compute_signature(meta, &fields);
+    fn enabled(&self, meta: &Metadata<'_>, cx: &Context<'_, Sub>) -> bool {
+        // Extract span context and compute signature
+        let span_context = self.extract_span_context(cx);
+        let signature = self.compute_signature(meta, &span_context);
         self.should_allow(signature)
     }
 }
@@ -431,9 +516,27 @@ where
 impl<S, Sub> Layer<Sub> for TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone + 'static,
-    Sub: Subscriber,
+    Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    // Layer methods can be empty since filtering is handled by the Filter impl
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, Sub>,
+    ) {
+        if self.span_context_fields.is_empty() {
+            return;
+        }
+
+        let mut visitor = FieldVisitor::new();
+        attrs.record(&mut visitor);
+        let fields = visitor.into_fields();
+
+        if let Some(span) = ctx.span(id) {
+            let mut extensions = span.extensions_mut();
+            extensions.insert(fields);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -451,6 +554,25 @@ mod tests {
             .unwrap();
 
         assert!(layer.limiter().registry().is_empty());
+    }
+
+    #[test]
+    fn test_span_context_fields_deduplication() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_span_context_fields(vec![
+                "user_id".to_string(),
+                "user_id".to_string(), // duplicate
+                "tenant_id".to_string(),
+                "".to_string(),        // empty, should be filtered
+                "user_id".to_string(), // another duplicate
+            ])
+            .build()
+            .unwrap();
+
+        // Should only have 2 unique fields: user_id and tenant_id
+        assert_eq!(layer.span_context_fields.len(), 2);
+        assert!(layer.span_context_fields.iter().any(|f| f == "user_id"));
+        assert!(layer.span_context_fields.iter().any(|f| f == "tenant_id"));
     }
 
     #[test]
@@ -714,6 +836,7 @@ mod tests {
 
         let layer = TracingRateLimitLayer {
             limiter,
+            span_context_fields: Arc::new(Vec::new()),
             #[cfg(feature = "async")]
             emitter_handle: Arc::new(Mutex::new(None)),
             #[cfg(not(feature = "async"))]

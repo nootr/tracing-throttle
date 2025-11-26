@@ -8,6 +8,7 @@
 pub mod clock;
 pub mod layer;
 pub mod storage;
+pub(crate) mod visitor;
 
 /// Mock implementations for testing.
 ///

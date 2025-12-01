@@ -288,7 +288,11 @@ where
             let count = state.counter.count();
 
             if count >= min_count {
-                let summary = SuppressionSummary::from_counter(*signature, &state.counter);
+                let summary = SuppressionSummary::from_counter_with_metadata(
+                    *signature,
+                    &state.counter,
+                    state.metadata.clone(),
+                );
                 summaries.push(summary);
             }
         });

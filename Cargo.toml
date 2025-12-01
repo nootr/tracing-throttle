@@ -55,6 +55,10 @@ required-features = []
 name = "redis"
 required-features = ["redis-storage"]
 
+[[example]]
+name = "summaries"
+required-features = ["async"]
+
 [[bench]]
 name = "rate_limiting"
 harness = false

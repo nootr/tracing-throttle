@@ -120,12 +120,12 @@
 //! ## Memory Management
 //!
 //! By default, tracks up to 10,000 unique event signatures with LRU eviction.
-//! Each signature uses approximately 150-250 bytes.
+//! Each signature uses approximately 200-400 bytes (includes event metadata for summaries).
 //!
 //! **Typical memory usage:**
-//! - 10,000 signatures (default): ~1.5-2.5 MB
-//! - 50,000 signatures: ~7.5-12.5 MB
-//! - 100,000 signatures: ~15-25 MB
+//! - 10,000 signatures (default): ~2-4 MB
+//! - 50,000 signatures: ~10-20 MB
+//! - 100,000 signatures: ~20-40 MB
 //!
 //! **Configuration:**
 //! ```rust,no_run
@@ -148,21 +148,26 @@
 //! ```text
 //! Per-Signature Memory:
 //! ├─ EventSignature (hash key)      ~32 bytes  (u64 hash)
-//! ├─ EventState (value)              ~120-200 bytes
+//! ├─ EventState (value)              ~170-370 bytes
 //! │  ├─ Policy state                 ~40-80 bytes (depends on policy type)
 //! │  ├─ SuppressionCounter           ~40 bytes (atomic counters + timestamp)
+//! │  ├─ EventMetadata (Optional)     ~50-200 bytes (level, message, target, fields)
+//! │  │  ├─ Level string              ~8 bytes
+//! │  │  ├─ Message string            ~20-100 bytes (depends on message length)
+//! │  │  ├─ Target string             ~20-50 bytes (module path)
+//! │  │  └─ Fields (BTreeMap)         ~0-50 bytes (depends on field count)
 //! │  └─ Metadata overhead            ~40 bytes (DashMap internals)
-//! └─ Total per signature             ~150-250 bytes (varies with policy)
+//! └─ Total per signature             ~200-400 bytes (varies with policy & message length)
 //! ```
 //!
 //! **Estimated memory usage at different signature limits:**
 //!
 //! | Signatures | Memory (typical) | Memory (worst case) | Use Case |
 //! |------------|------------------|---------------------|----------|
-//! | 1,000      | ~150 KB          | ~250 KB             | Small apps, few event types |
-//! | 10,000 (default) | ~1.5 MB    | ~2.5 MB             | Most applications |
-//! | 50,000     | ~7.5 MB          | ~12.5 MB            | High-cardinality apps |
-//! | 100,000    | ~15 MB           | ~25 MB              | Very large systems |
+//! | 1,000      | ~200 KB          | ~400 KB             | Small apps, few event types |
+//! | 10,000 (default) | ~2 MB      | ~4 MB               | Most applications |
+//! | 50,000     | ~10 MB           | ~20 MB              | High-cardinality apps |
+//! | 100,000    | ~20 MB           | ~40 MB              | Very large systems |
 //!
 //! **Additional overhead:**
 //! - Metrics: ~100 bytes (atomic counters)

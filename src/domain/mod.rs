@@ -4,9 +4,11 @@
 //! - Event signature computation
 //! - Rate limiting policies
 //! - Suppression counters and summaries
+//! - Event metadata for human-readable summaries
 //!
 //! All types in this layer are pure and easily testable.
 
+pub mod metadata;
 pub mod policy;
 pub mod signature;
 pub mod summary;

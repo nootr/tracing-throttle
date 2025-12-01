@@ -143,9 +143,11 @@ Uses a circuit breaker that **fails open** to preserve observability during erro
 
 ## Memory Management
 
-Tracks up to **10,000 unique event signatures** by default (~1.5-2.5 MB). Configure via `.with_max_signatures()` for high-cardinality applications.
+Tracks up to **10,000 unique event signatures** by default (~2-4 MB, including event metadata for human-readable summaries). Configure via `.with_max_signatures()` for high-cardinality applications.
 
-See the [API documentation](https://docs.rs/tracing-throttle) for memory breakdown, cardinality analysis, and configuration guidelines.
+**Memory per signature:** ~200-400 bytes (varies with message length and field count)
+
+See the [API documentation](https://docs.rs/tracing-throttle) for detailed memory breakdown, cardinality analysis, and configuration guidelines.
 
 ## Performance
 
@@ -166,6 +168,9 @@ cargo run --example basic
 
 # Demonstrate different policies
 cargo run --example policies
+
+# Show suppression summaries (default and custom formatters)
+cargo run --example summaries --features async
 ```
 
 ## Roadmap

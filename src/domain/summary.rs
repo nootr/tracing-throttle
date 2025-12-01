@@ -3,7 +3,7 @@
 //! This module tracks how many events have been suppressed and generates
 //! periodic summaries for emission.
 
-use crate::domain::signature::EventSignature;
+use crate::domain::{metadata::EventMetadata, signature::EventSignature};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -169,6 +169,8 @@ pub struct SuppressionSummary {
     pub last_suppressed: Instant,
     /// Duration of the suppression period
     pub duration: Duration,
+    /// Metadata about the event (for human-readable display)
+    pub metadata: Option<EventMetadata>,
 }
 
 impl SuppressionSummary {
@@ -184,15 +186,62 @@ impl SuppressionSummary {
             first_suppressed: first,
             last_suppressed: last,
             duration,
+            metadata: None,
+        }
+    }
+
+    /// Create a summary from a counter with metadata.
+    pub fn from_counter_with_metadata(
+        signature: EventSignature,
+        counter: &SuppressionCounter,
+        metadata: Option<EventMetadata>,
+    ) -> Self {
+        let first = counter.first_suppressed();
+        let last = counter.last_suppressed();
+        let duration = last.saturating_duration_since(first);
+
+        Self {
+            signature,
+            count: counter.count(),
+            first_suppressed: first,
+            last_suppressed: last,
+            duration,
+            metadata,
         }
     }
 
     /// Format the summary as a human-readable message.
+    ///
+    /// If metadata is available, includes event details.
+    /// Otherwise, shows just the signature hash.
     pub fn format_message(&self) -> String {
-        format!(
-            "Event suppressed {} times over {:?} (signature: {})",
-            self.count, self.duration, self.signature
-        )
+        if let Some(ref metadata) = self.metadata {
+            format!(
+                "Suppressed {} times over {:.2}s: {}",
+                self.count,
+                self.duration.as_secs_f64(),
+                metadata.format_brief()
+            )
+        } else {
+            format!(
+                "Event suppressed {} times over {:?} (signature: {})",
+                self.count, self.duration, self.signature
+            )
+        }
+    }
+
+    /// Format the summary with detailed field information.
+    pub fn format_detailed(&self) -> String {
+        if let Some(ref metadata) = self.metadata {
+            format!(
+                "Suppressed {} times over {:.2}s: {}",
+                self.count,
+                self.duration.as_secs_f64(),
+                metadata.format_detailed()
+            )
+        } else {
+            self.format_message()
+        }
     }
 }
 

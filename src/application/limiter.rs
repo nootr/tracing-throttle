@@ -8,6 +8,7 @@ use crate::application::metrics::Metrics;
 use crate::application::ports::Storage;
 use crate::application::registry::SuppressionRegistry;
 use crate::domain::{
+    metadata::EventMetadata,
     policy::{PolicyDecision, RateLimitPolicy},
     signature::EventSignature,
 };
@@ -84,6 +85,73 @@ where
         // Attempt rate limiting operation with panic protection
         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             self.registry.with_event_state(signature, |state, now| {
+                // Ask the policy whether to allow this event
+                let decision = state.policy.register_event(now);
+
+                match decision {
+                    PolicyDecision::Allow => LimitDecision::Allow,
+                    PolicyDecision::Suppress => {
+                        // Record the suppression
+                        state.counter.record_suppression(now);
+                        LimitDecision::Suppress
+                    }
+                }
+            })
+        }));
+
+        let decision = match result {
+            Ok(decision) => {
+                // Operation succeeded
+                self.circuit_breaker.record_success();
+                decision
+            }
+            Err(_) => {
+                // Operation panicked, record failure and fail open
+                self.circuit_breaker.record_failure();
+                LimitDecision::Allow
+            }
+        };
+
+        // Record metrics
+        match decision {
+            LimitDecision::Allow => self.metrics.record_allowed(),
+            LimitDecision::Suppress => self.metrics.record_suppressed(),
+        }
+
+        decision
+    }
+
+    /// Process an event with metadata and decide whether to allow or suppress it.
+    ///
+    /// This method captures event metadata on first occurrence for human-readable summaries.
+    ///
+    /// # Arguments
+    /// * `signature` - The event signature
+    /// * `metadata` - Event details (level, message, target, fields)
+    ///
+    /// # Returns
+    /// A `LimitDecision` indicating whether to allow or suppress the event.
+    ///
+    /// # Fail-Safe Behavior
+    /// Same as `check_event`: fails open if rate limiting operations fail.
+    pub fn check_event_with_metadata(
+        &self,
+        signature: EventSignature,
+        metadata: EventMetadata,
+    ) -> LimitDecision {
+        // Check circuit breaker state
+        if !self.circuit_breaker.allow_request() {
+            // Circuit is open, fail open (allow all events)
+            self.metrics.record_allowed();
+            return LimitDecision::Allow;
+        }
+
+        // Attempt rate limiting operation with panic protection
+        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            self.registry.with_event_state(signature, |state, now| {
+                // Capture metadata on first occurrence
+                state.set_metadata(metadata);
+
                 // Ask the policy whether to allow this event
                 let decision = state.policy.register_event(now);
 

@@ -4,7 +4,9 @@
 //! its rate limiting policy and suppression counters.
 
 use crate::application::ports::{Clock, Storage};
-use crate::domain::{policy::Policy, signature::EventSignature, summary::SuppressionCounter};
+use crate::domain::{
+    metadata::EventMetadata, policy::Policy, signature::EventSignature, summary::SuppressionCounter,
+};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -15,6 +17,8 @@ pub struct EventState {
     pub policy: Policy,
     /// Counter tracking suppressions
     pub counter: SuppressionCounter,
+    /// Metadata about the event (for human-readable summaries)
+    pub metadata: Option<EventMetadata>,
 }
 
 impl EventState {
@@ -23,6 +27,29 @@ impl EventState {
         Self {
             policy,
             counter: SuppressionCounter::new(initial_timestamp),
+            metadata: None,
+        }
+    }
+
+    /// Create new event state with metadata.
+    pub fn new_with_metadata(
+        policy: Policy,
+        initial_timestamp: Instant,
+        metadata: EventMetadata,
+    ) -> Self {
+        Self {
+            policy,
+            counter: SuppressionCounter::new(initial_timestamp),
+            metadata: Some(metadata),
+        }
+    }
+
+    /// Update or set the event metadata.
+    ///
+    /// This is called on first occurrence to capture event details.
+    pub fn set_metadata(&mut self, metadata: EventMetadata) {
+        if self.metadata.is_none() {
+            self.metadata = Some(metadata);
         }
     }
 
@@ -43,6 +70,7 @@ impl EventState {
                 first_suppressed,
                 last_suppressed,
             ),
+            metadata: None,
         }
     }
 }

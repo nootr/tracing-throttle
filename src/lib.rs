@@ -294,3 +294,6 @@ pub use infrastructure::{
 
 #[cfg(feature = "async")]
 pub use infrastructure::layer::SummaryFormatter;
+
+#[cfg(feature = "redis-storage")]
+pub use infrastructure::redis_storage::{RedisStorage, RedisStorageConfig};

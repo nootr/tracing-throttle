@@ -31,6 +31,24 @@ impl SuppressionCounter {
         }
     }
 
+    /// Create a counter from a snapshot (for deserialization).
+    ///
+    /// This is used by storage backends like Redis to reconstruct state.
+    #[cfg(feature = "redis-storage")]
+    pub fn from_snapshot(
+        suppressed_count: usize,
+        first_suppressed: Instant,
+        last_suppressed: Instant,
+    ) -> Self {
+        let first_nanos = Self::instant_to_nanos(first_suppressed);
+        let last_nanos = Self::instant_to_nanos(last_suppressed);
+        Self {
+            suppressed_count: AtomicUsize::new(suppressed_count),
+            first_suppressed_nanos: AtomicU64::new(first_nanos),
+            last_suppressed_nanos: AtomicU64::new(last_nanos),
+        }
+    }
+
     /// Record a new suppression event.
     pub fn record_suppression(&self, timestamp: Instant) {
         // Use AcqRel for fetch_add to synchronize with other threads
@@ -58,6 +76,16 @@ impl SuppressionCounter {
         // Use Acquire to synchronize with Release stores
         let nanos = self.last_suppressed_nanos.load(Ordering::Acquire);
         Self::nanos_to_instant(nanos)
+    }
+
+    /// Get a snapshot of the current state (for serialization).
+    #[cfg(feature = "redis-storage")]
+    pub fn snapshot(&self) -> super::summary::SuppressionSnapshot {
+        super::summary::SuppressionSnapshot {
+            suppressed_count: self.count(),
+            first_suppressed: self.first_suppressed(),
+            last_suppressed: self.last_suppressed(),
+        }
     }
 
     /// Reset the counter for a new tracking period.
@@ -115,6 +143,15 @@ impl SuppressionCounter {
         base.checked_add(Duration::from_nanos(nanos))
             .unwrap_or(*base)
     }
+}
+
+/// A snapshot of suppression counter state (for serialization).
+#[cfg(feature = "redis-storage")]
+#[derive(Debug, Clone)]
+pub struct SuppressionSnapshot {
+    pub suppressed_count: usize,
+    pub first_suppressed: Instant,
+    pub last_suppressed: Instant,
 }
 
 /// A summary of suppressed events for a particular signature.

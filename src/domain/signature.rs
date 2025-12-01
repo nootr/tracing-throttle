@@ -62,6 +62,22 @@ impl EventSignature {
         EventSignature(hasher.finish())
     }
 
+    /// Create a signature from a raw hash value.
+    ///
+    /// This is useful for deserializing signatures from external storage like Redis.
+    #[cfg(feature = "redis-storage")]
+    pub fn from_hash(hash: u64) -> Self {
+        EventSignature(hash)
+    }
+
+    /// Get the raw hash value of this signature.
+    ///
+    /// This is useful for serializing signatures to external storage like Redis.
+    #[cfg(feature = "redis-storage")]
+    pub fn as_hash(&self) -> u64 {
+        self.0
+    }
+
     /// Create a signature with minimal fields (level and message only).
     ///
     /// Useful for simple logging scenarios where field-based deduplication

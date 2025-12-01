@@ -25,6 +25,26 @@ impl EventState {
             counter: SuppressionCounter::new(initial_timestamp),
         }
     }
+
+    /// Create event state from a snapshot (for deserialization).
+    ///
+    /// This is used by storage backends like Redis to reconstruct state.
+    #[cfg(feature = "redis-storage")]
+    pub fn from_snapshot(
+        policy: Policy,
+        suppressed_count: usize,
+        first_suppressed: Instant,
+        last_suppressed: Instant,
+    ) -> Self {
+        Self {
+            policy,
+            counter: SuppressionCounter::from_snapshot(
+                suppressed_count,
+                first_suppressed,
+                last_suppressed,
+            ),
+        }
+    }
 }
 
 /// Registry managing all event suppression state.

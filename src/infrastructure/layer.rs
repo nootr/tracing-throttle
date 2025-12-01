@@ -556,6 +556,61 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             .build()
             .expect("default configuration is always valid")
     }
+
+    /// Create a layer with custom storage backend.
+    ///
+    /// This allows using alternative storage implementations like Redis for distributed
+    /// rate limiting across multiple application instances.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Custom storage implementation (must implement `Storage<EventSignature, EventState>`)
+    /// * `policy` - Rate limiting policy to apply
+    /// * `clock` - Clock implementation (use `SystemClock::new()` for production)
+    ///
+    /// # Example with Redis
+    ///
+    /// ```rust,ignore
+    /// use tracing_throttle::{TracingRateLimitLayer, RedisStorage, Policy, SystemClock};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let storage = Arc::new(
+    ///         RedisStorage::connect("redis://127.0.0.1/")
+    ///             .await
+    ///             .expect("Failed to connect")
+    ///     );
+    ///     let policy = Policy::token_bucket(100.0, 10.0).unwrap();
+    ///     let clock = Arc::new(SystemClock::new());
+    ///
+    ///     let layer = TracingRateLimitLayer::with_storage(storage, policy, clock);
+    /// }
+    /// ```
+    pub fn with_storage<ST>(
+        storage: ST,
+        policy: Policy,
+        clock: Arc<dyn Clock>,
+    ) -> TracingRateLimitLayer<ST>
+    where
+        ST: Storage<EventSignature, EventState> + Clone,
+    {
+        let metrics = Metrics::new();
+        let circuit_breaker = Arc::new(CircuitBreaker::new());
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let limiter = RateLimiter::new(registry, metrics, circuit_breaker);
+
+        TracingRateLimitLayer {
+            limiter,
+            span_context_fields: Arc::new(Vec::new()),
+            event_fields: Arc::new(Vec::new()),
+            #[cfg(feature = "async")]
+            emitter_handle: Arc::new(Mutex::new(None)),
+            #[cfg(not(feature = "async"))]
+            _emitter_config: EmitterConfig::new(Duration::from_secs(30))
+                .expect("30 seconds is valid"),
+        }
+    }
 }
 
 impl Default for TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {

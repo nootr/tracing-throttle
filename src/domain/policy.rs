@@ -6,6 +6,9 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "redis-storage")]
+use serde::{Deserialize, Serialize};
+
 /// Error returned when policy validation fails.
 ///
 /// This error type represents domain-level validation rules for rate limiting
@@ -89,6 +92,7 @@ pub trait RateLimitPolicy: Send + Sync {
 /// assert!(policy.register_event(now).is_suppress());
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "redis-storage", derive(Serialize, Deserialize))]
 pub struct CountBasedPolicy {
     max_count: usize,
     current_count: usize,
@@ -158,6 +162,161 @@ pub struct TimeWindowPolicy {
     max_events: usize,
     window_duration: Duration,
     event_timestamps: VecDeque<Instant>,
+}
+
+#[cfg(feature = "redis-storage")]
+impl Serialize for TimeWindowPolicy {
+    /// Serialize TimeWindowPolicy for Redis storage.
+    ///
+    /// # Serialization Strategy
+    ///
+    /// Event timestamps (Instant) are serialized as relative offsets from the first
+    /// timestamp in nanoseconds. This approach is chosen because:
+    ///
+    /// 1. Instant is not serializable (system-dependent, no epoch)
+    /// 2. We only care about relative timing between events, not absolute times
+    /// 3. Reduces serialized size (offsets vs full timestamps)
+    ///
+    /// # Important Note on Deserialization
+    ///
+    /// When deserializing, timestamps are reconstructed relative to the current time
+    /// (Instant::now()). This means the time window effectively "resets" when loaded
+    /// from Redis. This is acceptable because:
+    ///
+    /// - The relative spacing between events is preserved
+    /// - Old events will naturally expire based on window_duration
+    /// - This prevents issues with long-running processes where Instant could overflow
+    ///
+    /// **Trade-off**: Events near window expiration may get extra lifetime after reload,
+    /// but this is bounded by the window duration and considered acceptable for the
+    /// distributed rate limiting use case.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        // Convert Instants to nanoseconds relative to the first timestamp
+        let base = self.event_timestamps.front().copied();
+        let timestamps_nanos: Vec<u64> = if let Some(base_instant) = base {
+            self.event_timestamps
+                .iter()
+                .map(|instant| {
+                    instant
+                        .saturating_duration_since(base_instant)
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut state = serializer.serialize_struct("TimeWindowPolicy", 4)?;
+        state.serialize_field("max_events", &self.max_events)?;
+        state.serialize_field("window_duration_nanos", &self.window_duration.as_nanos())?;
+        state.serialize_field("timestamps_nanos", &timestamps_nanos)?;
+        state.serialize_field("base_timestamp_nanos", &base.map(|_| 0u64))?;
+        state.end()
+    }
+}
+
+#[cfg(feature = "redis-storage")]
+impl<'de> Deserialize<'de> for TimeWindowPolicy {
+    /// Deserialize TimeWindowPolicy from Redis storage.
+    ///
+    /// See `Serialize` implementation docs for important notes about timestamp handling.
+    /// Timestamps are reconstructed relative to the current time, effectively "resetting"
+    /// the time window while preserving relative event spacing.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            MaxEvents,
+            WindowDurationNanos,
+            TimestampsNanos,
+            BaseTimestampNanos,
+        }
+
+        struct TimeWindowPolicyVisitor;
+
+        impl<'de> Visitor<'de> for TimeWindowPolicyVisitor {
+            type Value = TimeWindowPolicy;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("struct TimeWindowPolicy")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<TimeWindowPolicy, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut max_events = None;
+                let mut window_duration_nanos = None;
+                let mut timestamps_nanos = None;
+                let mut _base_timestamp_nanos = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::MaxEvents => {
+                            if max_events.is_some() {
+                                return Err(de::Error::duplicate_field("max_events"));
+                            }
+                            max_events = Some(map.next_value()?);
+                        }
+                        Field::WindowDurationNanos => {
+                            if window_duration_nanos.is_some() {
+                                return Err(de::Error::duplicate_field("window_duration_nanos"));
+                            }
+                            window_duration_nanos = Some(map.next_value()?);
+                        }
+                        Field::TimestampsNanos => {
+                            if timestamps_nanos.is_some() {
+                                return Err(de::Error::duplicate_field("timestamps_nanos"));
+                            }
+                            timestamps_nanos = Some(map.next_value()?);
+                        }
+                        Field::BaseTimestampNanos => {
+                            _base_timestamp_nanos = Some(map.next_value::<Option<u64>>()?);
+                        }
+                    }
+                }
+
+                let max_events =
+                    max_events.ok_or_else(|| de::Error::missing_field("max_events"))?;
+                let window_duration_nanos: u128 = window_duration_nanos
+                    .ok_or_else(|| de::Error::missing_field("window_duration_nanos"))?;
+                let timestamps_nanos: Vec<u64> =
+                    timestamps_nanos.ok_or_else(|| de::Error::missing_field("timestamps_nanos"))?;
+
+                // Reconstruct Instants relative to current time
+                let now = Instant::now();
+                let event_timestamps: VecDeque<Instant> = timestamps_nanos
+                    .into_iter()
+                    .map(|nanos| now.checked_add(Duration::from_nanos(nanos)).unwrap_or(now))
+                    .collect();
+
+                Ok(TimeWindowPolicy {
+                    max_events,
+                    window_duration: Duration::from_nanos(window_duration_nanos as u64),
+                    event_timestamps,
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &[
+            "max_events",
+            "window_duration_nanos",
+            "timestamps_nanos",
+            "base_timestamp_nanos",
+        ];
+        deserializer.deserialize_struct("TimeWindowPolicy", FIELDS, TimeWindowPolicyVisitor)
+    }
 }
 
 impl TimeWindowPolicy {
@@ -232,6 +391,7 @@ impl RateLimitPolicy for TimeWindowPolicy {
 /// assert!(policy.register_event(now).is_allow());  // 4th
 /// ```
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "redis-storage", derive(Serialize, Deserialize))]
 pub struct ExponentialBackoffPolicy {
     event_count: u64,
     next_allowed: u64,
@@ -320,6 +480,128 @@ pub struct TokenBucketPolicy {
     last_refill: Option<Instant>,
 }
 
+#[cfg(feature = "redis-storage")]
+impl Serialize for TokenBucketPolicy {
+    /// Serialize TokenBucketPolicy for Redis storage.
+    ///
+    /// # Important: last_refill is NOT serialized
+    ///
+    /// The `last_refill` field (Option<Instant>) is intentionally not serialized because:
+    ///
+    /// 1. Instant cannot be serialized (system-dependent, no epoch)
+    /// 2. After deserialization, the first event will trigger a refill calculation
+    /// 3. The token count is preserved, so the bucket state is mostly maintained
+    ///
+    /// # Implications
+    ///
+    /// When a TokenBucketPolicy is loaded from Redis:
+    /// - Current token count is restored accurately
+    /// - `last_refill` is set to `None`
+    /// - On first event after reload, tokens will refill based on time since "now"
+    /// - This may allow a small burst beyond the intended rate immediately after reload
+    ///
+    /// **Trade-off**: This is acceptable because the impact is bounded by the bucket
+    /// capacity and only affects the first event after reload.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("TokenBucketPolicy", 4)?;
+        state.serialize_field("capacity", &self.capacity)?;
+        state.serialize_field("refill_rate", &self.refill_rate)?;
+        state.serialize_field("tokens", &self.tokens)?;
+        // We intentionally don't serialize last_refill - it will be set on first use after deserialization
+        // This is acceptable because the policy will refill based on the new timestamp
+        state.serialize_field("has_last_refill", &self.last_refill.is_some())?;
+        state.end()
+    }
+}
+
+#[cfg(feature = "redis-storage")]
+impl<'de> Deserialize<'de> for TokenBucketPolicy {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Capacity,
+            RefillRate,
+            Tokens,
+            HasLastRefill,
+        }
+
+        struct TokenBucketPolicyVisitor;
+
+        impl<'de> Visitor<'de> for TokenBucketPolicyVisitor {
+            type Value = TokenBucketPolicy;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("struct TokenBucketPolicy")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<TokenBucketPolicy, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut capacity = None;
+                let mut refill_rate = None;
+                let mut tokens = None;
+                let mut has_last_refill = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::Capacity => {
+                            if capacity.is_some() {
+                                return Err(de::Error::duplicate_field("capacity"));
+                            }
+                            capacity = Some(map.next_value()?);
+                        }
+                        Field::RefillRate => {
+                            if refill_rate.is_some() {
+                                return Err(de::Error::duplicate_field("refill_rate"));
+                            }
+                            refill_rate = Some(map.next_value()?);
+                        }
+                        Field::Tokens => {
+                            if tokens.is_some() {
+                                return Err(de::Error::duplicate_field("tokens"));
+                            }
+                            tokens = Some(map.next_value()?);
+                        }
+                        Field::HasLastRefill => {
+                            has_last_refill = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let capacity = capacity.ok_or_else(|| de::Error::missing_field("capacity"))?;
+                let refill_rate =
+                    refill_rate.ok_or_else(|| de::Error::missing_field("refill_rate"))?;
+                let tokens = tokens.ok_or_else(|| de::Error::missing_field("tokens"))?;
+                let _has_last_refill = has_last_refill.unwrap_or(false);
+
+                // Set last_refill to None - it will be set on first use after deserialization
+                // This is a safe approach: the bucket will refill based on the next timestamp
+                Ok(TokenBucketPolicy {
+                    capacity,
+                    refill_rate,
+                    tokens,
+                    last_refill: None,
+                })
+            }
+        }
+
+        const FIELDS: &[&str] = &["capacity", "refill_rate", "tokens", "has_last_refill"];
+        deserializer.deserialize_struct("TokenBucketPolicy", FIELDS, TokenBucketPolicyVisitor)
+    }
+}
+
 impl TokenBucketPolicy {
     /// Create a new token bucket policy.
     ///
@@ -396,6 +678,7 @@ impl RateLimitPolicy for TokenBucketPolicy {
 
 /// Convenience enum for common policy types.
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "redis-storage", derive(Serialize, Deserialize))]
 pub enum Policy {
     /// Count-based policy
     CountBased(CountBasedPolicy),

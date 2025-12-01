@@ -57,15 +57,18 @@ fn main() {
     let layer2 = TracingRateLimitLayer::builder()
         .with_policy(Policy::token_bucket(1000.0, 100.0).unwrap())
         .with_max_signatures(3)
-        .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_sig, state| {
-            // Prioritize by log level
-            match state.metadata.as_ref().map(|m| m.level.as_str()) {
-                Some("ERROR") => 100,
-                Some("WARN") => 50,
-                Some("INFO") => 10,
-                _ => 5,
-            }
-        })))
+        .with_eviction_strategy(EvictionStrategy::Priority {
+            max_entries: 3,
+            priority_fn: Arc::new(|_sig, state| {
+                // Prioritize by log level
+                match state.metadata.as_ref().map(|m| m.level.as_str()) {
+                    Some("ERROR") => 100,
+                    Some("WARN") => 50,
+                    Some("INFO") => 10,
+                    _ => 5,
+                }
+            }),
+        })
         .build()
         .unwrap();
 
@@ -150,6 +153,7 @@ fn main() {
     let layer4 = TracingRateLimitLayer::builder()
         .with_policy(Policy::token_bucket(1000.0, 100.0).unwrap())
         .with_eviction_strategy(EvictionStrategy::PriorityWithMemory {
+            max_entries: 10,
             priority_fn: Arc::new(|_sig, state| {
                 match state.metadata.as_ref().map(|m| m.level.as_str()) {
                     Some("ERROR") => 100,

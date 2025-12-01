@@ -131,14 +131,17 @@
 //! # use std::sync::Arc;
 //! let layer = TracingRateLimitLayer::builder()
 //!     .with_max_signatures(5_000)
-//!     .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_sig, state| {
-//!         match state.metadata.as_ref().map(|m| m.level.as_str()) {
-//!             Some("ERROR") => 100,
-//!             Some("WARN") => 50,
-//!             Some("INFO") => 10,
-//!             _ => 5,
-//!         }
-//!     })))
+//!     .with_eviction_strategy(EvictionStrategy::Priority {
+//!         max_entries: 5_000,
+//!         priority_fn: Arc::new(|_sig, state| {
+//!             match state.metadata.as_ref().map(|m| m.level.as_str()) {
+//!                 Some("ERROR") => 100,
+//!                 Some("WARN") => 50,
+//!                 Some("INFO") => 10,
+//!                 _ => 5,
+//!             }
+//!         }),
+//!     })
 //!     .build()
 //!     .unwrap();
 //! ```
@@ -166,6 +169,7 @@
 //! # use std::sync::Arc;
 //! let layer = TracingRateLimitLayer::builder()
 //!     .with_eviction_strategy(EvictionStrategy::PriorityWithMemory {
+//!         max_entries: 10_000,
 //!         priority_fn: Arc::new(|_sig, state| {
 //!             match state.metadata.as_ref().map(|m| m.level.as_str()) {
 //!                 Some("ERROR") => 100,
@@ -402,7 +406,7 @@ pub use application::{
     emitter::EmitterConfigError,
     limiter::RateLimiter,
     metrics::{Metrics, MetricsSnapshot},
-    ports::{Clock, Storage},
+    ports::{Clock, EvictionCandidate, EvictionPolicy, Storage},
     registry::SuppressionRegistry,
 };
 
@@ -411,8 +415,10 @@ pub use application::emitter::{EmitterHandle, ShutdownError};
 
 pub use infrastructure::{
     clock::SystemClock,
-    eviction::{EvictionStrategy, PriorityFn},
-    layer::{BuildError, TracingRateLimitLayer, TracingRateLimitLayerBuilder},
+    eviction::{
+        LruEviction, MemoryEviction, PriorityEviction, PriorityFn, PriorityWithMemoryEviction,
+    },
+    layer::{BuildError, EvictionStrategy, TracingRateLimitLayer, TracingRateLimitLayerBuilder},
     storage::ShardedStorage,
 };
 

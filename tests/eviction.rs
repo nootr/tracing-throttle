@@ -53,15 +53,18 @@ fn test_priority_eviction_keeps_high_priority() {
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::token_bucket(1000.0, 100.0).unwrap())
         .with_max_signatures(3)
-        .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_sig, state| {
-            // Higher priority for ERROR events
-            match state.metadata.as_ref().map(|m| m.level.as_str()) {
-                Some("ERROR") => 100,
-                Some("WARN") => 50,
-                Some("INFO") => 10,
-                _ => 5,
-            }
-        })))
+        .with_eviction_strategy(EvictionStrategy::Priority {
+            max_entries: 3,
+            priority_fn: Arc::new(|_sig, state| {
+                // Higher priority for ERROR events
+                match state.metadata.as_ref().map(|m| m.level.as_str()) {
+                    Some("ERROR") => 100,
+                    Some("WARN") => 50,
+                    Some("INFO") => 10,
+                    _ => 5,
+                }
+            }),
+        })
         .build()
         .unwrap();
 
@@ -148,6 +151,7 @@ fn test_priority_with_memory_combined() {
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::token_bucket(1000.0, 100.0).unwrap())
         .with_eviction_strategy(EvictionStrategy::PriorityWithMemory {
+            max_entries: 10,
             priority_fn: Arc::new(|_sig, state| {
                 match state.metadata.as_ref().map(|m| m.level.as_str()) {
                     Some("ERROR") => 100,
@@ -188,16 +192,20 @@ fn test_priority_with_memory_combined() {
 
 #[test]
 fn test_eviction_strategy_tracks_memory() {
-    let lru: EvictionStrategy<String, String> = EvictionStrategy::Lru;
+    let lru = EvictionStrategy::Lru { max_entries: 100 };
     assert!(!lru.tracks_memory());
 
-    let priority: EvictionStrategy<String, String> = EvictionStrategy::Priority(Arc::new(|_, _| 1));
+    let priority = EvictionStrategy::Priority {
+        max_entries: 100,
+        priority_fn: Arc::new(|_, _| 1),
+    };
     assert!(!priority.tracks_memory());
 
-    let memory: EvictionStrategy<String, String> = EvictionStrategy::Memory { max_bytes: 1000 };
+    let memory = EvictionStrategy::Memory { max_bytes: 1000 };
     assert!(memory.tracks_memory());
 
-    let combined: EvictionStrategy<String, String> = EvictionStrategy::PriorityWithMemory {
+    let combined = EvictionStrategy::PriorityWithMemory {
+        max_entries: 100,
         priority_fn: Arc::new(|_, _| 1),
         max_bytes: 1000,
     };
@@ -206,13 +214,14 @@ fn test_eviction_strategy_tracks_memory() {
 
 #[test]
 fn test_eviction_strategy_memory_limit() {
-    let lru: EvictionStrategy<String, String> = EvictionStrategy::Lru;
+    let lru = EvictionStrategy::Lru { max_entries: 100 };
     assert_eq!(lru.memory_limit(), None);
 
-    let memory: EvictionStrategy<String, String> = EvictionStrategy::Memory { max_bytes: 5000 };
+    let memory = EvictionStrategy::Memory { max_bytes: 5000 };
     assert_eq!(memory.memory_limit(), Some(5000));
 
-    let combined: EvictionStrategy<String, String> = EvictionStrategy::PriorityWithMemory {
+    let combined = EvictionStrategy::PriorityWithMemory {
+        max_entries: 100,
         priority_fn: Arc::new(|_, _| 1),
         max_bytes: 10000,
     };
@@ -221,16 +230,20 @@ fn test_eviction_strategy_memory_limit() {
 
 #[test]
 fn test_eviction_strategy_uses_priority() {
-    let lru: EvictionStrategy<String, String> = EvictionStrategy::Lru;
+    let lru = EvictionStrategy::Lru { max_entries: 100 };
     assert!(!lru.uses_priority());
 
-    let priority: EvictionStrategy<String, String> = EvictionStrategy::Priority(Arc::new(|_, _| 1));
+    let priority = EvictionStrategy::Priority {
+        max_entries: 100,
+        priority_fn: Arc::new(|_, _| 1),
+    };
     assert!(priority.uses_priority());
 
-    let memory: EvictionStrategy<String, String> = EvictionStrategy::Memory { max_bytes: 1000 };
+    let memory = EvictionStrategy::Memory { max_bytes: 1000 };
     assert!(!memory.uses_priority());
 
-    let combined: EvictionStrategy<String, String> = EvictionStrategy::PriorityWithMemory {
+    let combined = EvictionStrategy::PriorityWithMemory {
+        max_entries: 100,
         priority_fn: Arc::new(|_, _| 1),
         max_bytes: 1000,
     };

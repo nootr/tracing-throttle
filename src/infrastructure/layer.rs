@@ -81,8 +81,101 @@ pub struct TracingRateLimitLayerBuilder {
     summary_formatter: Option<SummaryFormatter>,
     span_context_fields: Vec<String>,
     event_fields: Vec<String>,
-    eviction_strategy:
-        Option<crate::infrastructure::eviction::EvictionStrategy<EventSignature, EventState>>,
+    eviction_strategy: Option<EvictionStrategy>,
+}
+
+/// Eviction strategy configuration for the rate limit layer.
+///
+/// This enum provides a user-friendly API that internally creates
+/// the appropriate EvictionPolicy adapter.
+#[derive(Clone)]
+pub enum EvictionStrategy {
+    /// LRU (Least Recently Used) eviction with entry count limit.
+    Lru {
+        /// Maximum number of entries
+        max_entries: usize,
+    },
+    /// Priority-based eviction using a custom function.
+    Priority {
+        /// Maximum number of entries
+        max_entries: usize,
+        /// Priority calculation function
+        priority_fn: crate::infrastructure::eviction::PriorityFn<EventSignature, EventState>,
+    },
+    /// Memory-based eviction with byte limit.
+    Memory {
+        /// Maximum memory usage in bytes
+        max_bytes: usize,
+    },
+    /// Combined priority and memory limits.
+    PriorityWithMemory {
+        /// Maximum number of entries
+        max_entries: usize,
+        /// Priority calculation function
+        priority_fn: crate::infrastructure::eviction::PriorityFn<EventSignature, EventState>,
+        /// Maximum memory usage in bytes
+        max_bytes: usize,
+    },
+}
+
+impl EvictionStrategy {
+    /// Check if this strategy tracks memory usage.
+    pub fn tracks_memory(&self) -> bool {
+        matches!(
+            self,
+            EvictionStrategy::Memory { .. } | EvictionStrategy::PriorityWithMemory { .. }
+        )
+    }
+
+    /// Get the memory limit if this strategy uses one.
+    pub fn memory_limit(&self) -> Option<usize> {
+        match self {
+            EvictionStrategy::Memory { max_bytes } => Some(*max_bytes),
+            EvictionStrategy::PriorityWithMemory { max_bytes, .. } => Some(*max_bytes),
+            _ => None,
+        }
+    }
+
+    /// Check if this strategy uses priority-based eviction.
+    pub fn uses_priority(&self) -> bool {
+        matches!(
+            self,
+            EvictionStrategy::Priority { .. } | EvictionStrategy::PriorityWithMemory { .. }
+        )
+    }
+}
+
+impl std::fmt::Debug for EvictionStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvictionStrategy::Lru { max_entries } => f
+                .debug_struct("Lru")
+                .field("max_entries", max_entries)
+                .finish(),
+            EvictionStrategy::Priority {
+                max_entries,
+                priority_fn: _,
+            } => f
+                .debug_struct("Priority")
+                .field("max_entries", max_entries)
+                .field("priority_fn", &"<fn>")
+                .finish(),
+            EvictionStrategy::Memory { max_bytes } => f
+                .debug_struct("Memory")
+                .field("max_bytes", max_bytes)
+                .finish(),
+            EvictionStrategy::PriorityWithMemory {
+                max_entries,
+                priority_fn: _,
+                max_bytes,
+            } => f
+                .debug_struct("PriorityWithMemory")
+                .field("max_entries", max_entries)
+                .field("priority_fn", &"<fn>")
+                .field("max_bytes", max_bytes)
+                .finish(),
+        }
+    }
 }
 
 impl TracingRateLimitLayerBuilder {
@@ -275,7 +368,7 @@ impl TracingRateLimitLayerBuilder {
     /// Set a custom eviction strategy for signature management.
     ///
     /// Controls which signatures are evicted when storage limits are reached.
-    /// If not set, uses the default LRU (Least Recently Used) strategy.
+    /// If not set, uses LRU eviction with the configured max_signatures limit.
     ///
     /// # Example: Priority-based eviction
     ///
@@ -283,15 +376,18 @@ impl TracingRateLimitLayerBuilder {
     /// # use tracing_throttle::{TracingRateLimitLayer, EvictionStrategy};
     /// # use std::sync::Arc;
     /// let layer = TracingRateLimitLayer::builder()
-    ///     .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_sig, state| {
-    ///         // Keep ERROR events longer than INFO events
-    ///         match state.metadata.as_ref().map(|m| m.level.as_str()) {
-    ///             Some("ERROR") => 100,
-    ///             Some("WARN") => 50,
-    ///             Some("INFO") => 10,
-    ///             _ => 5,
-    ///         }
-    ///     })))
+    ///     .with_eviction_strategy(EvictionStrategy::Priority {
+    ///         max_entries: 5_000,
+    ///         priority_fn: Arc::new(|_sig, state| {
+    ///             // Keep ERROR events longer than INFO events
+    ///             match state.metadata.as_ref().map(|m| m.level.as_str()) {
+    ///                 Some("ERROR") => 100,
+    ///                 Some("WARN") => 50,
+    ///                 Some("INFO") => 10,
+    ///                 _ => 5,
+    ///             }
+    ///         })
+    ///     })
     ///     .build()
     ///     .unwrap();
     /// ```
@@ -308,10 +404,7 @@ impl TracingRateLimitLayerBuilder {
     ///     .build()
     ///     .unwrap();
     /// ```
-    pub fn with_eviction_strategy(
-        mut self,
-        strategy: crate::infrastructure::eviction::EvictionStrategy<EventSignature, EventState>,
-    ) -> Self {
+    pub fn with_eviction_strategy(mut self, strategy: EvictionStrategy) -> Self {
         self.eviction_strategy = Some(strategy);
         self
     }
@@ -333,15 +426,51 @@ impl TracingRateLimitLayerBuilder {
         let circuit_breaker = Arc::new(CircuitBreaker::new());
 
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
-        let mut storage = if let Some(max) = self.max_signatures {
-            ShardedStorage::with_max_entries(max).with_metrics(metrics.clone())
-        } else {
-            ShardedStorage::new().with_metrics(metrics.clone())
+        let mut storage = ShardedStorage::new().with_metrics(metrics.clone());
+
+        // Convert eviction strategy to adapter, or use default LRU with max_signatures
+        let eviction_policy: Option<
+            Arc<dyn crate::application::ports::EvictionPolicy<EventSignature, EventState>>,
+        > = match self.eviction_strategy {
+            Some(EvictionStrategy::Lru { max_entries }) => Some(Arc::new(
+                crate::infrastructure::eviction::LruEviction::new(max_entries),
+            )),
+            Some(EvictionStrategy::Priority {
+                max_entries,
+                priority_fn,
+            }) => Some(Arc::new(
+                crate::infrastructure::eviction::PriorityEviction::new(max_entries, priority_fn),
+            )),
+            Some(EvictionStrategy::Memory { max_bytes }) => Some(Arc::new(
+                crate::infrastructure::eviction::MemoryEviction::new(max_bytes),
+            )),
+            Some(EvictionStrategy::PriorityWithMemory {
+                max_entries,
+                priority_fn,
+                max_bytes,
+            }) => Some(Arc::new(
+                crate::infrastructure::eviction::PriorityWithMemoryEviction::new(
+                    max_entries,
+                    priority_fn,
+                    max_bytes,
+                ),
+            )),
+            None => {
+                // Use default LRU with max_signatures if configured
+                self.max_signatures.map(|max| {
+                    Arc::new(crate::infrastructure::eviction::LruEviction::new(max))
+                        as Arc<
+                            dyn crate::application::ports::EvictionPolicy<
+                                EventSignature,
+                                EventState,
+                            >,
+                        >
+                })
+            }
         };
 
-        // Apply eviction strategy if configured
-        if let Some(strategy) = self.eviction_strategy {
-            storage = storage.with_eviction_strategy(strategy);
+        if let Some(policy) = eviction_policy {
+            storage = storage.with_eviction_policy(policy);
         }
 
         let storage = Arc::new(storage);

@@ -20,6 +20,20 @@ pub struct SuppressionCounter {
     last_suppressed_nanos: AtomicU64,
 }
 
+impl Clone for SuppressionCounter {
+    fn clone(&self) -> Self {
+        Self {
+            suppressed_count: AtomicUsize::new(self.suppressed_count.load(Ordering::Relaxed)),
+            first_suppressed_nanos: AtomicU64::new(
+                self.first_suppressed_nanos.load(Ordering::Relaxed),
+            ),
+            last_suppressed_nanos: AtomicU64::new(
+                self.last_suppressed_nanos.load(Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
 impl SuppressionCounter {
     /// Create a new counter with initial suppression.
     pub fn new(initial_timestamp: Instant) -> Self {

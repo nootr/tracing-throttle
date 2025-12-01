@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// State tracked for each event signature.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EventState {
     /// Rate limiting policy for this event
     pub policy: Policy,

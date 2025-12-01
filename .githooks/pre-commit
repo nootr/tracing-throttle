@@ -13,28 +13,36 @@ if ! cargo fmt -- --check; then
     exit 1
 fi
 
-# 2. Clippy (linting)
+# 2. Documentation check
+echo "→ Checking documentation..."
+if ! RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features 2>&1 | tee /tmp/cargo-doc.log; then
+    echo "❌ Documentation has errors or warnings."
+    grep -i "error\|warning" /tmp/cargo-doc.log || true
+    exit 1
+fi
+
+# 3. Clippy (linting)
 echo "→ Running clippy..."
 if ! cargo clippy --all-features --all-targets -- -D warnings; then
     echo "❌ Clippy found issues. Fix warnings before committing."
     exit 1
 fi
 
-# 3. Tests
+# 4. Tests
 echo "→ Running tests..."
 if ! cargo test --all-features; then
     echo "❌ Tests failed. Fix failing tests before committing."
     exit 1
 fi
 
-# 4. Build examples
+# 5. Build examples
 echo "→ Building examples..."
 if ! cargo build --examples; then
     echo "❌ Example builds failed."
     exit 1
 fi
 
-# 5. Check that examples run (quick smoke test)
+# 6. Check that examples run (quick smoke test)
 echo "→ Smoke testing examples..."
 if ! timeout 5 cargo run --example basic > /dev/null 2>&1; then
     echo "⚠️  Warning: basic example may have issues (timed out or failed)"

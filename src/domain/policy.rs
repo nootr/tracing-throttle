@@ -486,7 +486,7 @@ impl Serialize for TokenBucketPolicy {
     ///
     /// # Important: last_refill is NOT serialized
     ///
-    /// The `last_refill` field (Option<Instant>) is intentionally not serialized because:
+    /// The `last_refill` field (`Option<Instant>`) is intentionally not serialized because:
     ///
     /// 1. Instant cannot be serialized (system-dependent, no epoch)
     /// 2. After deserialization, the first event will trigger a refill calculation

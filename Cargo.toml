@@ -38,8 +38,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [features]
-default = ["async"]
+default = ["async", "human-readable"]
 async = ["tokio"]
+human-readable = []
 redis-storage = ["redis", "serde", "bincode", "tokio"]
 test-helpers = []
 

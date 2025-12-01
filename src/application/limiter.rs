@@ -8,10 +8,12 @@ use crate::application::metrics::Metrics;
 use crate::application::ports::Storage;
 use crate::application::registry::SuppressionRegistry;
 use crate::domain::{
-    metadata::EventMetadata,
     policy::{PolicyDecision, RateLimitPolicy},
     signature::EventSignature,
 };
+
+#[cfg(feature = "human-readable")]
+use crate::domain::metadata::EventMetadata;
 use std::panic;
 use std::sync::Arc;
 
@@ -125,6 +127,8 @@ where
     ///
     /// This method captures event metadata on first occurrence for human-readable summaries.
     ///
+    /// **Note:** Only available with the `human-readable` feature flag.
+    ///
     /// # Arguments
     /// * `signature` - The event signature
     /// * `metadata` - Event details (level, message, target, fields)
@@ -134,6 +138,7 @@ where
     ///
     /// # Fail-Safe Behavior
     /// Same as `check_event`: fails open if rate limiting operations fail.
+    #[cfg(feature = "human-readable")]
     pub fn check_event_with_metadata(
         &self,
         signature: EventSignature,

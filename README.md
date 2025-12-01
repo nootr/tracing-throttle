@@ -158,6 +158,17 @@ See [BENCHMARKS.md](BENCHMARKS.md) for detailed measurements and methodology.
 cargo bench --bench rate_limiting
 ```
 
+### Performance Optimization
+
+By default, the library captures event metadata for human-readable suppression summaries. This adds ~20-25% overhead in single-threaded scenarios. For maximum performance, disable the `human-readable` feature:
+
+```toml
+[dependencies]
+tracing-throttle = { version = "0.2", default-features = false, features = ["async"] }
+```
+
+This restores performance to 20M+ ops/sec single-threaded, but summaries will show signature hashes instead of event details.
+
 ## Examples
 
 Run the included examples:

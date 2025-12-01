@@ -288,11 +288,16 @@ where
             let count = state.counter.count();
 
             if count >= min_count {
+                #[cfg(feature = "human-readable")]
                 let summary = SuppressionSummary::from_counter_with_metadata(
                     *signature,
                     &state.counter,
                     state.metadata.clone(),
                 );
+
+                #[cfg(not(feature = "human-readable"))]
+                let summary = SuppressionSummary::from_counter(*signature, &state.counter);
+
                 summaries.push(summary);
             }
         });

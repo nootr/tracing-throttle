@@ -96,10 +96,17 @@ impl CircuitBreaker {
                 let last_failure = self.last_failure_time();
 
                 if now.duration_since(last_failure) >= self.config.recovery_timeout {
-                    // Attempt recovery by transitioning to half-open
-                    self.state
-                        .store(CircuitState::HalfOpen as u8, Ordering::Release);
-                    true
+                    // Attempt recovery by transitioning to half-open using compare-exchange
+                    // This ensures only one thread transitions to HalfOpen
+                    let result = self.state.compare_exchange(
+                        CircuitState::Open as u8,
+                        CircuitState::HalfOpen as u8,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+
+                    // Return true only if we successfully transitioned or if already HalfOpen
+                    result.is_ok() || self.state() == CircuitState::HalfOpen
                 } else {
                     // Circuit still open, fail open (allow request)
                     false

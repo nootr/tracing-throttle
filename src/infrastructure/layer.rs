@@ -449,6 +449,9 @@ where
     ///
     /// This method stores event metadata on first occurrence so summaries
     /// can show human-readable event details instead of just signature hashes.
+    ///
+    /// **Note:** Only available with the `human-readable` feature flag.
+    #[cfg(feature = "human-readable")]
     pub fn should_allow_with_metadata(
         &self,
         signature: EventSignature,
@@ -652,27 +655,35 @@ where
         let event_fields = self.extract_event_fields(event);
         combined_fields.extend(event_fields);
 
-        // Extract message from event
-        let mut visitor = FieldVisitor::new();
-        event.record(&mut visitor);
-        let all_fields = visitor.into_fields();
-        let message = all_fields
-            .get("message")
-            .cloned()
-            .unwrap_or_else(|| event.metadata().name().to_string());
-
         let metadata_obj = event.metadata();
         let signature = self.compute_signature(metadata_obj, &combined_fields);
 
-        // Create EventMetadata for this event
-        let event_metadata = crate::domain::metadata::EventMetadata::new(
-            metadata_obj.level().as_str().to_string(),
-            message,
-            metadata_obj.target().to_string(),
-            combined_fields.clone(),
-        );
+        #[cfg(feature = "human-readable")]
+        {
+            // Extract message from event for metadata
+            let mut visitor = FieldVisitor::new();
+            event.record(&mut visitor);
+            let all_fields = visitor.into_fields();
+            let message = all_fields
+                .get("message")
+                .cloned()
+                .unwrap_or_else(|| event.metadata().name().to_string());
 
-        self.should_allow_with_metadata(signature, event_metadata)
+            // Create EventMetadata for this event
+            let event_metadata = crate::domain::metadata::EventMetadata::new(
+                metadata_obj.level().as_str().to_string(),
+                message,
+                metadata_obj.target().to_string(),
+                combined_fields,
+            );
+
+            self.should_allow_with_metadata(signature, event_metadata)
+        }
+
+        #[cfg(not(feature = "human-readable"))]
+        {
+            self.should_allow(signature)
+        }
     }
 }
 

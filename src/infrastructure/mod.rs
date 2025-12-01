@@ -6,6 +6,7 @@
 //! - Tracing integration (Layer trait)
 
 pub mod clock;
+pub mod eviction;
 pub mod layer;
 pub mod storage;
 pub(crate) mod visitor;

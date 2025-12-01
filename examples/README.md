@@ -24,6 +24,18 @@ Shows how to use different rate limiting policies:
 - Count-based (simple event counting)
 - Exponential backoff (for extremely noisy logs)
 
+### Eviction Strategies
+
+```bash
+cargo run --example eviction
+```
+
+Demonstrates different eviction strategies for signature management:
+- LRU (Least Recently Used) - default, evicts oldest entries
+- Priority-based - keeps high-priority events (ERROR over INFO)
+- Memory-based - enforces memory limits
+- Combined - uses both priority and memory constraints
+
 ### Redis Storage (Distributed Rate Limiting)
 
 **Requires**: Docker and the `redis-storage` feature

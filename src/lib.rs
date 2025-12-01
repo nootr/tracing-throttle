@@ -331,6 +331,7 @@ pub use application::emitter::{EmitterHandle, ShutdownError};
 
 pub use infrastructure::{
     clock::SystemClock,
+    eviction::{EvictionStrategy, PriorityFn},
     layer::{BuildError, TracingRateLimitLayer, TracingRateLimitLayerBuilder},
     storage::ShardedStorage,
 };

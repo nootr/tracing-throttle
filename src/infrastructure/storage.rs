@@ -4,9 +4,10 @@
 
 use crate::application::metrics::Metrics;
 use crate::application::ports::Storage;
+use crate::infrastructure::eviction::EvictionStrategy;
 use dashmap::DashMap;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 /// Internal wrapper that tracks last access time for LRU eviction.
@@ -65,14 +66,15 @@ impl<V> StorageEntry<V> {
     }
 }
 
-/// Thread-safe sharded storage backed by DashMap with optional LRU eviction.
+/// Thread-safe sharded storage backed by DashMap with configurable eviction.
 ///
 /// DashMap provides lock-free reads and fine-grained locking for writes,
 /// making it ideal for high-throughput logging scenarios.
 ///
-/// When `max_entries` is set, the storage uses approximate LRU eviction:
-/// when at capacity, it samples a few random entries and evicts the oldest.
-#[derive(Debug)]
+/// Supports multiple eviction strategies:
+/// - LRU: Evict least recently used (default)
+/// - Priority: Evict lowest priority entries
+/// - Memory: Evict when memory limit exceeded
 pub struct ShardedStorage<K, V>
 where
     K: Eq + Hash + Clone,
@@ -83,6 +85,29 @@ where
     epoch: Instant,
     /// Optional metrics for tracking evictions
     metrics: Option<Metrics>,
+    /// Eviction strategy
+    eviction_strategy: Option<EvictionStrategy<K, V>>,
+    /// Current memory usage in bytes (when memory tracking enabled)
+    current_memory_bytes: AtomicUsize,
+}
+
+// Manual Debug implementation since EvictionStrategy contains function pointers
+impl<K, V> std::fmt::Debug for ShardedStorage<K, V>
+where
+    K: Eq + Hash + Clone + std::fmt::Debug,
+    V: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardedStorage")
+            .field("map", &format!("{} entries", self.map.len()))
+            .field("max_entries", &self.max_entries)
+            .field("eviction_strategy", &self.eviction_strategy)
+            .field(
+                "current_memory_bytes",
+                &self.current_memory_bytes.load(Ordering::Relaxed),
+            )
+            .finish()
+    }
 }
 
 impl<K, V> ShardedStorage<K, V>
@@ -96,6 +121,8 @@ where
             max_entries: None,
             epoch: Instant::now(),
             metrics: None,
+            eviction_strategy: None,
+            current_memory_bytes: AtomicUsize::new(0),
         }
     }
 
@@ -108,6 +135,8 @@ where
             max_entries: Some(max_entries),
             epoch: Instant::now(),
             metrics: None,
+            eviction_strategy: None,
+            current_memory_bytes: AtomicUsize::new(0),
         }
     }
 
@@ -119,16 +148,101 @@ where
         self
     }
 
-    /// Evict one entry using approximate LRU.
+    /// Set the eviction strategy for this storage.
     ///
-    /// Samples up to 5 entries and evicts the one with the oldest access time.
+    /// # Example: Priority-based eviction
+    /// ```ignore
+    /// use std::sync::Arc;
+    /// use tracing_throttle::infrastructure::storage::ShardedStorage;
+    /// use tracing_throttle::infrastructure::eviction::EvictionStrategy;
+    ///
+    /// let storage = ShardedStorage::new()
+    ///     .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_k, _v| 10)));
+    /// ```
+    pub fn with_eviction_strategy(mut self, strategy: EvictionStrategy<K, V>) -> Self {
+        self.eviction_strategy = Some(strategy);
+        self
+    }
+
+    /// Estimate memory usage for a key-value pair.
+    ///
+    /// This is an approximation used for memory-based eviction.
+    fn estimate_entry_size(_key: &K, _value: &V) -> usize {
+        // Conservative estimate of entry size
+        // Includes: key, value, storage overhead, and estimated heap allocations
+        let base_size = std::mem::size_of::<K>()
+            + std::mem::size_of::<V>()
+            + std::mem::size_of::<StorageEntry<V>>();
+
+        // Add estimate for heap-allocated data (strings, collections, etc.)
+        // This is a rough approximation - actual usage may vary
+        let estimated_heap = 200; // Conservative estimate for metadata strings
+
+        base_size + estimated_heap
+    }
+
+    /// Check if eviction is needed based on configured limits.
+    fn should_evict(&self) -> bool {
+        // Check entry count limit
+        let entries_exceeded = self.max_entries.is_some_and(|max| self.len() >= max);
+
+        // Check memory limit if strategy uses memory tracking
+        let memory_exceeded = self
+            .eviction_strategy
+            .as_ref()
+            .and_then(|s| s.memory_limit())
+            .is_some_and(|max_bytes| {
+                self.current_memory_bytes.load(Ordering::Relaxed) >= max_bytes
+            });
+
+        entries_exceeded || memory_exceeded
+    }
+
+    /// Evict one entry using the configured strategy.
+    ///
+    /// Strategy determines which entry to evict:
+    /// - LRU: Oldest accessed entry (default)
+    /// - Priority: Lowest priority entry
+    /// - Memory: LRU when memory limit exceeded
     fn evict_one(&self) {
+        let key_to_evict = match &self.eviction_strategy {
+            Some(EvictionStrategy::Priority(priority_fn))
+            | Some(EvictionStrategy::PriorityWithMemory { priority_fn, .. }) => {
+                self.find_lowest_priority(priority_fn)
+            }
+            Some(EvictionStrategy::Memory { .. }) | Some(EvictionStrategy::Lru) | None => {
+                self.find_oldest_lru()
+            }
+        };
+
+        // Evict the selected entry
+        if let Some(key) = key_to_evict {
+            if let Some((_, entry)) = self.map.remove(&key) {
+                // Update memory tracking if enabled
+                if self
+                    .eviction_strategy
+                    .as_ref()
+                    .is_some_and(|s| s.tracks_memory())
+                {
+                    let size = Self::estimate_entry_size(&key, &entry.value);
+                    self.current_memory_bytes.fetch_sub(size, Ordering::Relaxed);
+                }
+
+                // Record eviction in metrics if available
+                if let Some(ref metrics) = self.metrics {
+                    metrics.record_eviction();
+                }
+            }
+        }
+    }
+
+    /// Find the entry with the oldest access time (LRU).
+    fn find_oldest_lru(&self) -> Option<K> {
         const SAMPLE_SIZE: usize = 5;
 
         let mut oldest_key: Option<K> = None;
         let mut oldest_time = Instant::now();
 
-        // Sample entries and find the oldest
         for (idx, entry) in self.map.iter().enumerate() {
             if idx >= SAMPLE_SIZE {
                 break;
@@ -141,15 +255,32 @@ where
             }
         }
 
-        // Evict the oldest entry found
-        if let Some(key) = oldest_key {
-            self.map.remove(&key);
+        oldest_key
+    }
 
-            // Record eviction in metrics if available
-            if let Some(ref metrics) = self.metrics {
-                metrics.record_eviction();
+    /// Find the entry with the lowest priority.
+    fn find_lowest_priority(
+        &self,
+        priority_fn: &crate::infrastructure::eviction::PriorityFn<K, V>,
+    ) -> Option<K> {
+        const SAMPLE_SIZE: usize = 20; // Larger sample for better priority selection
+
+        let mut lowest_key: Option<K> = None;
+        let mut lowest_priority = u32::MAX;
+
+        for (idx, entry) in self.map.iter().enumerate() {
+            if idx >= SAMPLE_SIZE {
+                break;
+            }
+
+            let priority = priority_fn(entry.key(), &entry.value().value);
+            if lowest_key.is_none() || priority < lowest_priority {
+                lowest_priority = priority;
+                lowest_key = Some(entry.key().clone());
             }
         }
+
+        lowest_key
     }
 
     /// Get the number of entries.
@@ -188,6 +319,10 @@ where
             max_entries: self.max_entries,
             epoch: self.epoch,
             metrics: self.metrics.clone(),
+            eviction_strategy: self.eviction_strategy.clone(),
+            current_memory_bytes: AtomicUsize::new(
+                self.current_memory_bytes.load(Ordering::Relaxed),
+            ),
         };
         for entry in self.map.iter() {
             let key = entry.key().clone();
@@ -213,18 +348,33 @@ where
     where
         F: FnOnce(&mut V) -> R,
     {
+        let is_new_entry = !self.map.contains_key(&key);
+
         // Check if we need to make space before inserting
-        if let Some(max) = self.max_entries {
-            if self.map.len() >= max && !self.map.contains_key(&key) {
-                self.evict_one();
-            }
+        if is_new_entry && self.should_evict() {
+            self.evict_one();
         }
 
         let now = Instant::now();
         let epoch = self.epoch;
 
-        let entry = self.map.entry(key);
-        let mut storage_entry = entry.or_insert_with(|| StorageEntry::new(factory(), now, epoch));
+        let entry = self.map.entry(key.clone());
+        let mut storage_entry = entry.or_insert_with(|| {
+            let value = factory();
+
+            // Track memory for new entries if enabled
+            if is_new_entry
+                && self
+                    .eviction_strategy
+                    .as_ref()
+                    .is_some_and(|s| s.tracks_memory())
+            {
+                let size = Self::estimate_entry_size(&key, &value);
+                self.current_memory_bytes.fetch_add(size, Ordering::Relaxed);
+            }
+
+            StorageEntry::new(value, now, epoch)
+        });
 
         // Update access time
         storage_entry.update_access(now, epoch);

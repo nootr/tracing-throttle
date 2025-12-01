@@ -81,6 +81,8 @@ pub struct TracingRateLimitLayerBuilder {
     summary_formatter: Option<SummaryFormatter>,
     span_context_fields: Vec<String>,
     event_fields: Vec<String>,
+    eviction_strategy:
+        Option<crate::infrastructure::eviction::EvictionStrategy<EventSignature, EventState>>,
 }
 
 impl TracingRateLimitLayerBuilder {
@@ -270,6 +272,50 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
+    /// Set a custom eviction strategy for signature management.
+    ///
+    /// Controls which signatures are evicted when storage limits are reached.
+    /// If not set, uses the default LRU (Least Recently Used) strategy.
+    ///
+    /// # Example: Priority-based eviction
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::{TracingRateLimitLayer, EvictionStrategy};
+    /// # use std::sync::Arc;
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_sig, state| {
+    ///         // Keep ERROR events longer than INFO events
+    ///         match state.metadata.as_ref().map(|m| m.level.as_str()) {
+    ///             Some("ERROR") => 100,
+    ///             Some("WARN") => 50,
+    ///             Some("INFO") => 10,
+    ///             _ => 5,
+    ///         }
+    ///     })))
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// # Example: Memory-based eviction
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::{TracingRateLimitLayer, EvictionStrategy};
+    /// // Evict when total memory exceeds 5MB
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_eviction_strategy(EvictionStrategy::Memory {
+    ///         max_bytes: 5 * 1024 * 1024,
+    ///     })
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    pub fn with_eviction_strategy(
+        mut self,
+        strategy: crate::infrastructure::eviction::EvictionStrategy<EventSignature, EventState>,
+    ) -> Self {
+        self.eviction_strategy = Some(strategy);
+        self
+    }
+
     /// Build the layer.
     ///
     /// # Errors
@@ -287,11 +333,18 @@ impl TracingRateLimitLayerBuilder {
         let circuit_breaker = Arc::new(CircuitBreaker::new());
 
         let clock = self.clock.unwrap_or_else(|| Arc::new(SystemClock::new()));
-        let storage = if let Some(max) = self.max_signatures {
-            Arc::new(ShardedStorage::with_max_entries(max).with_metrics(metrics.clone()))
+        let mut storage = if let Some(max) = self.max_signatures {
+            ShardedStorage::with_max_entries(max).with_metrics(metrics.clone())
         } else {
-            Arc::new(ShardedStorage::new().with_metrics(metrics.clone()))
+            ShardedStorage::new().with_metrics(metrics.clone())
         };
+
+        // Apply eviction strategy if configured
+        if let Some(strategy) = self.eviction_strategy {
+            storage = storage.with_eviction_strategy(strategy);
+        }
+
+        let storage = Arc::new(storage);
         let registry = SuppressionRegistry::new(storage, clock, self.policy);
         let limiter = RateLimiter::new(registry.clone(), metrics.clone(), circuit_breaker);
 
@@ -555,6 +608,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             summary_formatter: None,
             span_context_fields: Vec::new(),
             event_fields: Vec::new(),
+            eviction_strategy: None,
         }
     }
 

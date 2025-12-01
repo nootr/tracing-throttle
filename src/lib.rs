@@ -3,8 +3,9 @@
 //! High-performance log deduplication and rate limiting for the `tracing` ecosystem.
 //!
 //! This crate provides a `tracing::Layer` that suppresses repetitive log events based on
-//! configurable policies. Events are deduplicated by their signature (level, message, and
-//! fields), so identical log events are throttled together.
+//! configurable policies. Events are deduplicated by their signature (level, target, and message).
+//! Event field **values** are NOT included in signatures by default - use
+//! `.with_event_fields()` to include specific fields.
 //!
 //!
 //! ## Quick Start
@@ -30,6 +31,41 @@
 //!     .with(tracing_subscriber::fmt::layer().with_filter(rate_limit))
 //!     .init();
 //! ```
+//!
+//! ## Event Signatures
+//!
+//! Events are deduplicated based on their **signature**. By default, signatures include:
+//! - Event level (INFO, WARN, ERROR, etc.)
+//! - Target (module path)
+//! - Message text
+//!
+//! **Event field VALUES are NOT included by default.** This means:
+//!
+//! ```rust,no_run
+//! # use tracing::info;
+//! info!(user_id = 1, "Login");  // Signature: (INFO, target, "Login")
+//! info!(user_id = 2, "Login");  // SAME signature - will be rate limited together!
+//! ```
+//!
+//! To rate-limit events per field value, use `.with_event_fields()`:
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::TracingRateLimitLayer;
+//! let layer = TracingRateLimitLayer::builder()
+//!     .with_event_fields(vec!["user_id".to_string()])  // Include user_id in signature
+//!     .build()
+//!     .unwrap();
+//! ```
+//!
+//! Now each user_id gets its own rate limit:
+//!
+//! ```rust,no_run
+//! # use tracing::info;
+//! info!(user_id = 1, "Login");  // Signature: (INFO, target, "Login", user_id=1)
+//! info!(user_id = 2, "Login");  // Signature: (INFO, target, "Login", user_id=2)
+//! ```
+//!
+//! **See `tests/event_fields.rs` for complete examples.**
 //!
 //! ## Features
 //!
@@ -138,31 +174,33 @@
 //!
 //! **What affects signature cardinality?**
 //!
-//! Event signatures are computed from `(level, message, fields)`. Your cardinality
-//! depends on how many unique combinations you emit:
+//! By default, signatures are computed from `(level, target, message)` only.
+//! Field values are NOT included unless configured with `.with_event_fields()`.
 //!
 //! ```rust,no_run
 //! # use tracing::info;
 //! // Low cardinality (good) - same signature for all occurrences
 //! info!("User login successful");  // Always same signature
+//! info!(user_id = 123, "User login");  // SAME signature (user_id not included by default)
 //!
-//! // Medium cardinality - signatures vary by field values
+//! // Medium cardinality - if you configure .with_event_fields(vec!["user_id".to_string()])
 //! # let id = 123;
 //! info!(user_id = %id, "User login");  // One signature per unique user_id
 //!
-//! // High cardinality (danger) - unique signature per event
+//! // High cardinality (danger) - if you configure .with_event_fields(vec!["request_id".to_string()])
 //! # let uuid = "abc";
 //! info!(request_id = %uuid, "Processing");  // New signature every time!
 //! ```
 //!
 //! **Cardinality examples:**
 //!
-//! | Pattern | Unique Signatures | Memory Impact |
-//! |---------|-------------------|---------------|
-//! | Static messages only | ~10-100 | Minimal (~10 KB) |
-//! | Messages + stable IDs (user, tenant) | ~1,000-10,000 | Low (1-2 MB) |
-//! | Messages + session IDs | ~10,000-100,000 | Medium (10-25 MB) |
-//! | Messages + request UUIDs | Unbounded | **High risk** |
+//! | Pattern | Config | Unique Signatures | Memory Impact |
+//! |---------|--------|-------------------|---------------|
+//! | Static messages only | Default | ~10-100 | Minimal (~10 KB) |
+//! | Messages with fields | Default (fields ignored) | ~10-100 | Minimal (~10 KB) |
+//! | `.with_event_fields(["user_id"])` | Stable IDs | ~1,000-10,000 | Low (1-2 MB) |
+//! | `.with_event_fields(["session_id"])` | Session IDs | ~10,000-100,000 | Medium (10-25 MB) |
+//! | `.with_event_fields(["request_id"])` | UUIDs | Unbounded | **High risk** |
 //!
 //! **How to estimate your cardinality:**
 //!

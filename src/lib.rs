@@ -34,13 +34,21 @@
 //!
 //! ## Features
 //!
+//! ### Rate Limiting Policies
 //! - **Token bucket limiting**: Burst tolerance with smooth recovery (recommended default)
 //! - **Time-window limiting**: Allow K events per time period with natural reset
 //! - **Count-based limiting**: Allow N events, then suppress the rest (no recovery)
 //! - **Exponential backoff**: Emit at exponentially increasing intervals (1st, 2nd, 4th, 8th...)
 //! - **Custom policies**: Implement your own rate limiting logic
+//!
+//! ### Eviction Strategies
+//! - **LRU eviction**: Evict least recently used signatures (default)
+//! - **Priority-based**: Custom priority functions to keep important events (ERROR over INFO)
+//! - **Memory-based**: Enforce byte limits with automatic memory tracking
+//! - **Combined**: Use both priority and memory constraints together
+//!
+//! ### Other Features
 //! - **Per-signature throttling**: Different messages are throttled independently
-//! - **LRU eviction**: Optional memory limits with automatic eviction of least recently used signatures
 //! - **Observability metrics**: Built-in tracking of allowed, suppressed, and evicted events
 //! - **Fail-safe circuit breaker**: Fails open during errors to preserve observability
 //!
@@ -99,6 +107,78 @@
 //! let snapshot = metrics.snapshot();
 //! println!("Suppression rate: {:.2}%", snapshot.suppression_rate() * 100.0);
 //! ```
+//!
+//! ## Eviction Strategies
+//!
+//! Control which event signatures are kept when storage limits are reached:
+//!
+//! ### LRU (Default)
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::TracingRateLimitLayer;
+//! let layer = TracingRateLimitLayer::builder()
+//!     .with_max_signatures(10_000)  // Uses LRU eviction by default
+//!     .build()
+//!     .unwrap();
+//! ```
+//!
+//! ### Priority-Based
+//!
+//! Keep important events (ERROR) over less important ones (INFO):
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::{TracingRateLimitLayer, EvictionStrategy};
+//! # use std::sync::Arc;
+//! let layer = TracingRateLimitLayer::builder()
+//!     .with_max_signatures(5_000)
+//!     .with_eviction_strategy(EvictionStrategy::Priority(Arc::new(|_sig, state| {
+//!         match state.metadata.as_ref().map(|m| m.level.as_str()) {
+//!             Some("ERROR") => 100,
+//!             Some("WARN") => 50,
+//!             Some("INFO") => 10,
+//!             _ => 5,
+//!         }
+//!     })))
+//!     .build()
+//!     .unwrap();
+//! ```
+//!
+//! ### Memory-Based
+//!
+//! Enforce memory limits with automatic tracking:
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::{TracingRateLimitLayer, EvictionStrategy};
+//! let layer = TracingRateLimitLayer::builder()
+//!     .with_eviction_strategy(EvictionStrategy::Memory {
+//!         max_bytes: 5 * 1024 * 1024,  // 5MB limit
+//!     })
+//!     .build()
+//!     .unwrap();
+//! ```
+//!
+//! ### Combined
+//!
+//! Use both priority and memory constraints:
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::{TracingRateLimitLayer, EvictionStrategy};
+//! # use std::sync::Arc;
+//! let layer = TracingRateLimitLayer::builder()
+//!     .with_eviction_strategy(EvictionStrategy::PriorityWithMemory {
+//!         priority_fn: Arc::new(|_sig, state| {
+//!             match state.metadata.as_ref().map(|m| m.level.as_str()) {
+//!                 Some("ERROR") => 100,
+//!                 _ => 10,
+//!             }
+//!         }),
+//!         max_bytes: 10 * 1024 * 1024,
+//!     })
+//!     .build()
+//!     .unwrap();
+//! ```
+//!
+//! See `examples/eviction.rs` for complete working examples.
 //!
 //! ## Fail-Safe Operation
 //!

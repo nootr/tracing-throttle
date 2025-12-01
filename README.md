@@ -25,7 +25,7 @@ High-volume Rust applications often suffer from repetitive or bursty log events 
 - **🔧 Zero Config**: Sensible defaults work out of the box, extensive customization available
 - **📊 Full Visibility**: Clear, human-readable summaries show exactly what events were suppressed
 - **🛡️ Production Safe**: Circuit breaker fails open to preserve observability during errors
-- **💾 Memory Bounded**: LRU eviction prevents unbounded growth in high-cardinality scenarios
+- **💾 Memory Bounded**: Advanced eviction strategies (LRU, priority-based, memory-based) prevent unbounded growth
 
 ### How It Works
 
@@ -41,6 +41,7 @@ The layer computes a signature for each log event based on its level, message te
 - [Installation](#installation)
 - [Quick Start](#quick-start)
 - [Rate Limiting Policies](#rate-limiting-policies)
+- [Eviction Strategies](#eviction-strategies)
 - [Observability & Metrics](#observability--metrics)
 - [Fail-Safe Operation](#fail-safe-operation)
 - [Memory Management](#memory-management)
@@ -57,7 +58,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-throttle = "0.2"
+tracing-throttle = "0.3"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 ```
@@ -109,6 +110,16 @@ Policy::exponential_backoff()
 **Custom**: Implement `RateLimitPolicy` trait for custom behavior
 
 See the [API documentation](https://docs.rs/tracing-throttle) for details on each policy.
+
+## Eviction Strategies
+
+Control which signatures are kept when storage limits are reached:
+- **LRU** (default) - Evict least recently used
+- **Priority-based** - Keep important events (ERROR over INFO)
+- **Memory-based** - Enforce byte limits
+- **Combined** - Use both priority and memory constraints
+
+See the [API documentation](https://docs.rs/tracing-throttle) and `examples/eviction.rs` for details.
 
 ## Observability & Metrics
 
@@ -224,16 +235,20 @@ cargo run --example summaries --features async
 - Metrics integration examples (Prometheus/OpenTelemetry integration patterns documented)
 
 ### v0.3.0 (Advanced Features)
-- Pluggable storage backends (Redis, etc.)
-- Streaming-friendly summaries
-- Rate limit by span context
-- Advanced eviction policies
+✅ **Completed:**
+- Pluggable storage backends (Redis backend with distributed rate limiting)
+- Rate limit by span context (per-user, per-tenant, per-request)
+- Advanced eviction policies (LRU, priority-based, memory-based, combined)
 
-### v1.0.0 (Stable Release)
-- Stable API guarantee
-- Production-ready documentation
-- Optional WASM support
-- Performance regression testing
+### v1.0.0 (Stability & Production Readiness)
+Focus on reliability, documentation, and production hardening:
+- Comprehensive integration guide and best practices
+- Performance tuning guide with real-world scenarios
+- Production deployment examples and patterns
+- Stability testing and edge case coverage
+- API stabilization and deprecation policy
+- Telemetry and observability cookbook
+- Performance regression testing in CI
 
 ## Development
 

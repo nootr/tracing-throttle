@@ -32,6 +32,18 @@
 //!     .init();
 //! ```
 //!
+//! ## Features
+//!
+//! - **Token bucket limiting**: Burst tolerance with smooth recovery (recommended default)
+//! - **Time-window limiting**: Allow K events per time period with natural reset
+//! - **Count-based limiting**: Allow N events, then suppress the rest (no recovery)
+//! - **Exponential backoff**: Emit at exponentially increasing intervals (1st, 2nd, 4th, 8th...)
+//! - **Custom policies**: Implement your own rate limiting logic
+//! - **Per-signature throttling**: Different messages are throttled independently
+//! - **LRU eviction**: Optional memory limits with automatic eviction of least recently used signatures
+//! - **Observability metrics**: Built-in tracking of allowed, suppressed, and evicted events
+//! - **Fail-safe circuit breaker**: Fails open during errors to preserve observability
+//!
 //! ## Event Signatures
 //!
 //! Events are deduplicated based on their **signature**. By default, signatures include:
@@ -66,18 +78,6 @@
 //! ```
 //!
 //! **See `tests/event_fields.rs` for complete examples.**
-//!
-//! ## Features
-//!
-//! - **Token bucket limiting**: Burst tolerance with smooth recovery (recommended default)
-//! - **Time-window limiting**: Allow K events per time period with natural reset
-//! - **Count-based limiting**: Allow N events, then suppress the rest (no recovery)
-//! - **Exponential backoff**: Emit at exponentially increasing intervals (1st, 2nd, 4th, 8th...)
-//! - **Custom policies**: Implement your own rate limiting logic
-//! - **Per-signature throttling**: Different messages are throttled independently
-//! - **LRU eviction**: Optional memory limits with automatic eviction of least recently used signatures
-//! - **Observability metrics**: Built-in tracking of allowed, suppressed, and evicted events
-//! - **Fail-safe circuit breaker**: Fails open during errors to preserve observability
 //!
 //! ## Observability
 //!

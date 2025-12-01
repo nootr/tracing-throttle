@@ -20,10 +20,10 @@ High-volume Rust applications often suffer from repetitive or bursty log events 
 
 ### Why tracing-throttle?
 
-- **🚀 High Performance**: Lock-free operations and sharded storage handle 20M+ ops/sec
+- **🚀 High Performance**: Lock-free operations and sharded storage handle 15M+ ops/sec
 - **🎯 Smart Deduplication**: Per-signature throttling means different errors are limited independently
 - **🔧 Zero Config**: Sensible defaults work out of the box, extensive customization available
-- **📊 Full Visibility**: Built-in metrics track what's being suppressed and why
+- **📊 Full Visibility**: Clear, human-readable summaries show exactly what events were suppressed
 - **🛡️ Production Safe**: Circuit breaker fails open to preserve observability during errors
 - **💾 Memory Bounded**: LRU eviction prevents unbounded growth in high-cardinality scenarios
 

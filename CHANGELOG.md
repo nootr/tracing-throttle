@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2025-12-01
+
+### Added
+
+- **Redis Storage Backend** (behind `redis-storage` feature flag)
+  - Distributed rate limiting across multiple application instances
+  - Automatic TTL-based cleanup of inactive signatures
+  - Connection pooling via `redis::aio::ConnectionManager`
+  - Fail-safe operation (continues if Redis unavailable)
+  - Custom serialization for Policy types containing Instant fields
+  - Complete Redis example with Docker Compose setup
+  - See `examples/redis.rs` and `examples/redis/README.md`
+
+### Changed
+
+- **Documentation Improvements**
+  - Clarified that event field **values** are NOT included in signatures by default
+  - Added new "Event Signatures" section with clear examples
+  - Updated signature cardinality documentation with field behavior examples
+  - Added table showing memory impact of `.with_event_fields()` configuration
+  - References `tests/event_fields.rs` for working examples
+  - Fixes confusion reported in [#1](https://github.com/nootr/tracing-throttle/issues/1)
+
 ## [0.2.0] - 2025-11-26
 
 ### Added

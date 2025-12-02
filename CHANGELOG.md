@@ -5,6 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2025-12-02
+
+### Added
+
+- **Comprehensive Test Coverage** (51 new tests, +2,482 lines)
+  - Circuit breaker: race conditions, boundary conditions, clone behavior
+  - Emitter: panic recovery, callback ordering, error handling
+  - Limiter: fail-open behavior, policy application, concurrent access
+  - Storage: memory tracking accuracy, eviction sampling edge cases
+  - Redis storage: serialization, TTL, concurrent access, prefix isolation
+  - Total test count: 276 tests (225 unit + 39 integration + 12 Redis)
+
+### Fixed
+
+- Circuit breaker test flakiness due to timing sensitivity
+- Clone behavior tests now correctly validate independent atomic state
+- Removed unnecessary `.clone()` calls on Copy types (clippy warnings)
+- Fixed Policy API usage in tests (time_window and exponential_backoff signatures)
+
+### Changed
+
+- Removed JSON serialization tests (Redis uses bincode, not JSON)
+- Simplified policy serialization tests to match actual implementation
+
+## [0.3.0] - 2025-12-01
+
+### Added
+
+- **Advanced Eviction Strategies** (4 strategies total)
+  - LRU eviction (default) - evicts least recently used signatures
+  - Priority-based eviction - custom function determines importance
+  - Memory-based eviction - enforces byte limits with lock-free tracking
+  - Combined priority+memory - uses both constraints simultaneously
+  - New `.with_eviction_strategy()` builder method
+  - Sampling-based eviction (5-20 samples) for O(1) amortized performance
+  - Conservative memory estimation (~200 bytes per signature)
+
+- **Human-Readable Suppression Summaries**
+  - Event details (level, target, message) included in suppression summaries
+  - Makes it easier to identify which events were suppressed
+  - Helpful for quick diagnostics without needing to look up signature hashes
+
+### Changed
+
+- **Documentation Restructure**
+  - Added comprehensive eviction examples to lib.rs API docs
+  - Organized features into categories (policies, eviction, other)
+  - Simplified README eviction section, refer to docs for details
+  - Updated "Why tracing-throttle?" to mention eviction strategies
+  - Refocused v1.0.0 roadmap on stability and production readiness
+
+### Improved
+
+- **Performance**: Updated benchmarks showing 15M+ ops/sec with advanced eviction
+- **Memory tracking**: Atomic memory accounting for lock-free operations
+- **Testing**: 9 new integration tests for eviction strategies (42 total tests)
+
 ## [0.2.1] - 2025-12-01
 
 ### Added

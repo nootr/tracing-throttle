@@ -1,11 +1,35 @@
-# 🎛️ tracing-throttle
+<h1 align="center">🎚️ tracing-throttle</h1>
+<p align="center">
+  High-performance log deduplication and rate limiting for the Rust `tracing` ecosystem.
+</p>
+<br />
 
 [![Crates.io](https://img.shields.io/crates/v/tracing-throttle.svg)](https://crates.io/crates/tracing-throttle)
 [![Documentation](https://docs.rs/tracing-throttle/badge.svg)](https://docs.rs/tracing-throttle)
 [![Test](https://github.com/nootr/tracing-throttle/workflows/Test/badge.svg)](https://github.com/nootr/tracing-throttle/actions)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-High-performance log deduplication and rate limiting for the Rust `tracing` ecosystem.
+<details>
+    <summary>Table of contents</summary>
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+  - [Rate Limiting Policies](#rate-limiting-policies)
+  - [Eviction Strategies](#eviction-strategies)
+  - [Observability & Metrics](#observability--metrics)
+  - [Fail-Safe Operation](#fail-safe-operation)
+  - [Memory Management](#memory-management)
+- [Performance](#performance)
+  - [Performance Optimization](#performance-optimization)
+- [Examples](#examples)
+- [Roadmap](#roadmap)
+- [Development](#development)
+  - [Setting Up Git Hooks](#setting-up-git-hooks)
+- [Contributing](#contributing)
+- [License](#license)
+
+</details>
 
 ## Introduction
 
@@ -22,7 +46,7 @@ High-volume Rust applications often suffer from repetitive or bursty log events 
 
 - **🚀 High Performance**: Lock-free operations and sharded storage handle 15M+ ops/sec
 - **🎯 Smart Deduplication**: Per-signature throttling means different errors are limited independently
-- **🔧 Zero Config**: Sensible defaults work out of the box, extensive customization available
+- **🔧 Zero Config Necessary**: Sensible defaults work out of the box, extensive customization available
 - **📊 Full Visibility**: Clear, human-readable summaries show exactly what events were suppressed
 - **🛡️ Production Safe**: Circuit breaker fails open to preserve observability during errors
 - **💾 Memory Bounded**: Advanced eviction strategies (LRU, priority-based, memory-based) prevent unbounded growth
@@ -35,22 +59,6 @@ The layer computes a signature for each log event based on its level, message te
 - Different errors are limited independently
 - Dynamic fields in messages don't break deduplication
 - Per-signature statistics enable targeted investigation
-
-## Table of Contents
-
-- [Installation](#installation)
-- [Quick Start](#quick-start)
-- [Rate Limiting Policies](#rate-limiting-policies)
-- [Eviction Strategies](#eviction-strategies)
-- [Observability & Metrics](#observability--metrics)
-- [Fail-Safe Operation](#fail-safe-operation)
-- [Memory Management](#memory-management)
-- [Performance](#performance)
-- [Examples](#examples)
-- [Roadmap](#roadmap)
-- [Development](#development)
-- [Contributing](#contributing)
-- [License](#license)
 
 ## Installation
 
@@ -85,7 +93,9 @@ for i in 0..1000 {
 // First 50 emitted immediately (burst), then 1/sec (60/min) sustained rate
 ```
 
-## Rate Limiting Policies
+## Configuration
+
+### Rate Limiting Policies
 
 **Token Bucket (Default)**: Burst tolerance with natural recovery
 ```rust
@@ -111,7 +121,7 @@ Policy::exponential_backoff()
 
 See the [API documentation](https://docs.rs/tracing-throttle) for details on each policy.
 
-## Eviction Strategies
+### Eviction Strategies
 
 Control which signatures are kept when storage limits are reached:
 - **LRU** (default) - Evict least recently used
@@ -121,9 +131,9 @@ Control which signatures are kept when storage limits are reached:
 
 See the [API documentation](https://docs.rs/tracing-throttle) and `examples/eviction.rs` for details.
 
-## Observability & Metrics
+### Observability & Metrics
 
-### Metrics
+#### Metrics
 
 Track rate limiting behavior with built-in metrics:
 
@@ -134,7 +144,7 @@ println!("Suppressed: {}", metrics.events_suppressed());
 println!("Suppression rate: {:.1}%", metrics.snapshot().suppression_rate() * 100.0);
 ```
 
-### Active Suppression Summaries
+#### Active Suppression Summaries
 
 Optionally emit periodic summaries of suppressed events as log events (requires `async` feature):
 
@@ -148,11 +158,11 @@ let rate_limit = TracingRateLimitLayer::builder()
 
 See the [API documentation](https://docs.rs/tracing-throttle) for available metrics and customization options.
 
-## Fail-Safe Operation
+### Fail-Safe Operation
 
 Uses a circuit breaker that **fails open** to preserve observability during errors. If rate limiting operations fail, all events are allowed through rather than being lost.
 
-## Memory Management
+### Memory Management
 
 Tracks up to **10,000 unique event signatures** by default (~2-4 MB, including event metadata for human-readable summaries). Configure via `.with_max_signatures()` for high-cardinality applications.
 
@@ -175,10 +185,10 @@ By default, the library captures event metadata for human-readable suppression s
 
 ```toml
 [dependencies]
-tracing-throttle = { version = "0.2", default-features = false, features = ["async"] }
+tracing-throttle = { version = "0.3", default-features = false, features = ["async"] }
 ```
 
-This restores performance to 20M+ ops/sec single-threaded, but summaries will show signature hashes instead of event details.
+This improves performance, but summaries will show signature hashes instead of event details.
 
 ## Examples
 

@@ -159,30 +159,29 @@ mod tests {
     #[test]
     fn test_lru_extreme_time_differences() {
         let policy = LruEviction::new(10);
-        let now = Instant::now();
 
-        let ancient = now
-            .checked_sub(std::time::Duration::from_secs(365 * 24 * 3600))
-            .unwrap_or(now);
-        let middle = now
-            .checked_sub(std::time::Duration::from_secs(3600))
-            .unwrap_or(now);
+        // Create three instants with guaranteed ordering by waiting between them
+        let ancient = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let middle = Instant::now();
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let recent = Instant::now();
 
         let candidates = vec![
             EvictionCandidate {
                 key: "recent".to_string(),
                 value: 1,
-                last_access: now,
+                last_access: recent,
             },
             EvictionCandidate {
                 key: "ancient".to_string(),
                 value: 2,
-                last_access: ancient, // 1 year ago (or earliest possible)
+                last_access: ancient,
             },
             EvictionCandidate {
                 key: "middle".to_string(),
                 value: 3,
-                last_access: middle, // 1 hour ago (or earlier)
+                last_access: middle,
             },
         ];
 

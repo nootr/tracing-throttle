@@ -248,4 +248,216 @@ mod tests {
 
         assert_eq!(sig1, sig2);
     }
+
+    // === Edge Case and Collision Resistance Tests ===
+
+    #[test]
+    fn test_null_bytes_in_strings() {
+        let sig1 = EventSignature::simple("INFO", "test\0message");
+        let sig2 = EventSignature::simple("INFO", "test\0message");
+        let sig3 = EventSignature::simple("INFO", "testmessage");
+
+        assert_eq!(sig1, sig2, "Null bytes should be handled consistently");
+        assert_ne!(sig1, sig3, "Null bytes should affect hash");
+    }
+
+    #[test]
+    fn test_zero_width_characters() {
+        // Zero-width space (U+200B)
+        let sig1 = EventSignature::simple("INFO", "test\u{200B}message");
+        let sig2 = EventSignature::simple("INFO", "test\u{200B}message");
+        let sig3 = EventSignature::simple("INFO", "testmessage");
+
+        assert_eq!(
+            sig1, sig2,
+            "Zero-width characters should be included in hash"
+        );
+        assert_ne!(sig1, sig3, "Zero-width characters should affect hash");
+    }
+
+    #[test]
+    fn test_rtl_and_bidi_text() {
+        // Arabic text (RTL)
+        let sig1 = EventSignature::simple("INFO", "مرحبا بك");
+        let sig2 = EventSignature::simple("INFO", "مرحبا بك");
+        let sig3 = EventSignature::simple("INFO", "Hello");
+
+        assert_eq!(sig1, sig2);
+        assert_ne!(sig1, sig3);
+    }
+
+    #[test]
+    fn test_emoji_sequences() {
+        // Emoji with skin tone modifiers
+        let sig1 = EventSignature::simple("INFO", "👋🏽");
+        let sig2 = EventSignature::simple("INFO", "👋🏽");
+        let sig3 = EventSignature::simple("INFO", "👋"); // Without modifier
+
+        assert_eq!(sig1, sig2);
+        assert_ne!(sig1, sig3, "Emoji modifiers should affect hash");
+    }
+
+    #[test]
+    fn test_combining_characters() {
+        // 'e' with combining acute accent vs precomposed 'é'
+        let sig1 = EventSignature::simple("INFO", "cafe\u{0301}"); // e + combining acute
+        let sig2 = EventSignature::simple("INFO", "café"); // precomposed é
+
+        // These are different Unicode representations and should hash differently
+        assert_ne!(
+            sig1, sig2,
+            "Different Unicode normalizations should hash differently"
+        );
+    }
+
+    #[test]
+    fn test_very_long_message() {
+        // 10K character message
+        let long_msg = "a".repeat(10_000);
+        let sig1 = EventSignature::simple("INFO", &long_msg);
+        let sig2 = EventSignature::simple("INFO", &long_msg);
+
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_very_long_field_values() {
+        use std::collections::BTreeMap;
+
+        let mut fields = BTreeMap::new();
+        fields.insert("data".to_string(), "x".repeat(10_000));
+
+        let sig1 = EventSignature::new("INFO", "message", &fields, Some("target"));
+        let sig2 = EventSignature::new("INFO", "message", &fields, Some("target"));
+
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_many_fields() {
+        use std::collections::BTreeMap;
+
+        let mut fields = BTreeMap::new();
+        for i in 0..1000 {
+            fields.insert(format!("field_{}", i), format!("value_{}", i));
+        }
+
+        let sig1 = EventSignature::new("INFO", "message", &fields, Some("target"));
+        let sig2 = EventSignature::new("INFO", "message", &fields, Some("target"));
+
+        assert_eq!(sig1, sig2);
+    }
+
+    #[test]
+    fn test_empty_vs_missing_strings() {
+        use std::collections::BTreeMap;
+
+        let mut fields1 = BTreeMap::new();
+        fields1.insert("key".to_string(), "".to_string()); // Empty value
+
+        let fields2 = BTreeMap::new(); // Missing key
+
+        let sig1 = EventSignature::new("INFO", "msg", &fields1, Some("target"));
+        let sig2 = EventSignature::new("INFO", "msg", &fields2, Some("target"));
+
+        assert_ne!(sig1, sig2, "Empty string should differ from missing field");
+    }
+
+    #[test]
+    fn test_field_order_independence_large() {
+        use std::collections::BTreeMap;
+
+        let mut fields1 = BTreeMap::new();
+        for i in 0..100 {
+            fields1.insert(format!("z_field_{}", i), format!("value_{}", i));
+            fields1.insert(format!("a_field_{}", i), format!("value_{}", i));
+        }
+
+        let mut fields2 = BTreeMap::new();
+        for i in 0..100 {
+            fields2.insert(format!("a_field_{}", i), format!("value_{}", i));
+            fields2.insert(format!("z_field_{}", i), format!("value_{}", i));
+        }
+
+        let sig1 = EventSignature::new("INFO", "msg", &fields1, Some("target"));
+        let sig2 = EventSignature::new("INFO", "msg", &fields2, Some("target"));
+
+        assert_eq!(sig1, sig2, "Field insertion order should not affect hash");
+    }
+
+    #[test]
+    fn test_hash_collision_resistance() {
+        // Test patterns that might produce collisions in weak hash functions
+        use std::collections::HashSet;
+
+        let mut hashes = HashSet::new();
+        let test_cases = vec![
+            ("INFO", "test"),
+            ("INFO", "tset"), // Anagram
+            ("INFO", "TEST"), // Case difference
+            ("IFNO", "test"), // Level anagram
+            ("INFO", ""),
+            ("", "test"),
+            ("INFO", "test\0"),
+            ("INFO", "test "), // Trailing space
+            ("INFO", " test"), // Leading space
+        ];
+
+        for (level, message) in test_cases {
+            let sig = EventSignature::simple(level, message);
+            let hash = sig.as_u64();
+            assert!(
+                hashes.insert(hash),
+                "Hash collision detected for ('{}', '{}')",
+                level,
+                message
+            );
+        }
+    }
+
+    #[test]
+    fn test_signature_display_format() {
+        let sig = EventSignature::simple("INFO", "test");
+        let display = format!("{}", sig);
+
+        // Should contain a hex representation
+        assert!(!display.is_empty());
+        assert!(display.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    #[cfg(feature = "redis-storage")]
+    fn test_signature_from_hash_roundtrip() {
+        let sig1 = EventSignature::simple("INFO", "test message");
+        let hash = sig1.as_hash();
+        let sig2 = EventSignature::from_hash(hash);
+
+        assert_eq!(sig1, sig2);
+        assert_eq!(sig1.as_hash(), sig2.as_hash());
+    }
+
+    #[test]
+    fn test_control_characters() {
+        // Test various control characters
+        let sig1 = EventSignature::simple("INFO", "test\x01\x02\x03\x1F");
+        let sig2 = EventSignature::simple("INFO", "test\x01\x02\x03\x1F");
+        let sig3 = EventSignature::simple("INFO", "test");
+
+        assert_eq!(sig1, sig2);
+        assert_ne!(sig1, sig3);
+    }
+
+    #[test]
+    fn test_whitespace_variations() {
+        let sig1 = EventSignature::simple("INFO", "test message"); // space
+        let sig2 = EventSignature::simple("INFO", "test\tmessage"); // tab
+        let sig3 = EventSignature::simple("INFO", "test\u{00A0}message"); // non-breaking space
+        let sig4 = EventSignature::simple("INFO", "test\u{2003}message"); // em space
+
+        // All should be different
+        assert_ne!(sig1, sig2);
+        assert_ne!(sig1, sig3);
+        assert_ne!(sig1, sig4);
+        assert_ne!(sig2, sig3);
+    }
 }

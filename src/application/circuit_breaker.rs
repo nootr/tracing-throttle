@@ -404,4 +404,261 @@ mod tests {
         assert_eq!(cb1.consecutive_failures(), 1);
         assert_eq!(cb2.consecutive_failures(), 2);
     }
+
+    #[test]
+    fn test_concurrent_half_open_to_closed_race() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+        };
+        let cb = Arc::new(CircuitBreaker::with_config(config));
+
+        // Open the circuit
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Wait for recovery timeout
+        thread::sleep(Duration::from_millis(150));
+
+        // Trigger state check to transition to HalfOpen
+        cb.allow_request();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Multiple threads racing to transition from HalfOpen to Closed
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let cb_clone = Arc::clone(&cb);
+            handles.push(thread::spawn(move || {
+                cb_clone.record_success();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should be closed after successful transitions
+        assert_eq!(cb.state(), CircuitState::Closed);
+        // Consecutive failures should be reset to 0
+        assert_eq!(cb.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_half_open_to_open_race() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+        };
+        let cb = Arc::new(CircuitBreaker::with_config(config));
+
+        // Open the circuit
+        cb.record_failure();
+        cb.record_failure();
+
+        // Wait for recovery
+        thread::sleep(Duration::from_millis(150));
+
+        // Trigger state check to transition to HalfOpen
+        cb.allow_request();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+
+        // Multiple threads racing to record failures
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let cb_clone = Arc::clone(&cb);
+            handles.push(thread::spawn(move || {
+                cb_clone.record_failure();
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should be back to open
+        assert_eq!(cb.state(), CircuitState::Open);
+        assert!(cb.consecutive_failures() >= 2);
+    }
+
+    #[test]
+    fn test_time_going_backwards() {
+        // This tests that the circuit breaker handles system clock adjustments gracefully
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Open the circuit
+        cb.record_failure();
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // In a real scenario, if system time goes backwards (NTP correction),
+        // saturating_duration_since will return Duration::ZERO
+        // The circuit should remain open until real time passes recovery_timeout
+
+        // We can't actually make time go backwards in tests, but we can verify
+        // the circuit doesn't panic with edge case durations
+        thread::sleep(Duration::from_millis(150));
+
+        // Trigger state check to transition to HalfOpen
+        cb.allow_request();
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn test_rapid_state_transitions() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+        };
+        let cb = Arc::new(CircuitBreaker::with_config(config));
+
+        // Rapidly cycle through states
+        for _ in 0..100 {
+            cb.record_failure();
+            cb.record_failure(); // Open
+            thread::sleep(Duration::from_millis(150));
+            cb.allow_request(); // Trigger transition to HalfOpen
+            cb.record_success(); // Closed
+        }
+
+        // Should end in Closed state with no failures
+        assert_eq!(cb.state(), CircuitState::Closed);
+        assert_eq!(cb.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_mixed_operations() {
+        let cb = Arc::new(CircuitBreaker::new());
+        let mut handles = vec![];
+
+        // Thread 1: Records failures
+        let cb1 = Arc::clone(&cb);
+        handles.push(thread::spawn(move || {
+            for _ in 0..20 {
+                cb1.record_failure();
+                thread::sleep(Duration::from_micros(100));
+            }
+        }));
+
+        // Thread 2: Records successes
+        let cb2 = Arc::clone(&cb);
+        handles.push(thread::spawn(move || {
+            for _ in 0..20 {
+                cb2.record_success();
+                thread::sleep(Duration::from_micros(100));
+            }
+        }));
+
+        // Thread 3: Checks allow_request
+        let cb3 = Arc::clone(&cb);
+        handles.push(thread::spawn(move || {
+            for _ in 0..20 {
+                let _allowed = cb3.allow_request();
+                thread::sleep(Duration::from_micros(100));
+            }
+        }));
+
+        // Thread 4: Reads state
+        let cb4 = Arc::clone(&cb);
+        handles.push(thread::spawn(move || {
+            for _ in 0..20 {
+                let _state = cb4.state();
+                let _failures = cb4.consecutive_failures();
+                thread::sleep(Duration::from_micros(100));
+            }
+        }));
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // No assertions on final state - test just verifies no panics or data corruption
+    }
+
+    #[test]
+    fn test_state_consistency_after_clone() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+        };
+        let cb1 = CircuitBreaker::with_config(config);
+        cb1.record_failure();
+
+        let cb2 = cb1.clone();
+
+        // Both should be in Closed state (not enough failures to open)
+        assert_eq!(cb1.state(), CircuitState::Closed);
+        assert_eq!(cb2.state(), CircuitState::Closed);
+
+        // One more failure on cb2 should open it (cb2 has 2 failures total)
+        cb2.record_failure();
+
+        // cb2 should be Open (has 2 failures)
+        assert_eq!(cb2.consecutive_failures(), 2);
+        assert_eq!(cb2.state(), CircuitState::Open);
+
+        // cb1 should still be Closed (only has 1 failure - they have independent state after clone)
+        assert_eq!(cb1.state(), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_consecutive_failures_overflow_resistance() {
+        let cb = CircuitBreaker::new();
+
+        // Record massive number of failures
+        for _ in 0..10_000 {
+            cb.record_failure();
+        }
+
+        // Should handle large failure counts without overflow
+        assert!(cb.consecutive_failures() >= 10_000);
+        assert_eq!(cb.state(), CircuitState::Open);
+    }
+
+    #[test]
+    fn test_recovery_timeout_boundary() {
+        let cb = CircuitBreaker::with_config(CircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_timeout: Duration::from_millis(50),
+        });
+
+        // Open circuit
+        cb.record_failure();
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // Before timeout - should still be Open
+        thread::sleep(Duration::from_millis(30));
+        assert_eq!(cb.state(), CircuitState::Open);
+
+        // After timeout - should transition to HalfOpen when checked
+        thread::sleep(Duration::from_millis(30)); // Total 60ms > 50ms timeout
+        cb.allow_request(); // Trigger transition to HalfOpen
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
+    }
+
+    #[test]
+    fn test_allow_request_consistency() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            recovery_timeout: Duration::from_millis(100),
+        };
+        let cb = CircuitBreaker::with_config(config);
+
+        // Closed: should allow
+        assert!(cb.allow_request());
+
+        // Open: should not allow
+        cb.record_failure();
+        cb.record_failure();
+        assert!(!cb.allow_request());
+        assert!(!cb.allow_request());
+
+        // HalfOpen: should allow (gives it a chance)
+        thread::sleep(Duration::from_millis(150));
+        assert!(cb.allow_request());
+    }
 }

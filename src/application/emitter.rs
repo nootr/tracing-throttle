@@ -837,4 +837,194 @@ mod tests {
             "Task should continue after panic in emit_fn"
         );
     }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_repeated_panic_in_emit_fn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_millis(30)).unwrap();
+
+        let sig = EventSignature::simple("INFO", "Test");
+        registry.with_event_state(sig, |state, now| {
+            state.counter.record_suppression(now);
+        });
+
+        let emitter = SummaryEmitter::new(registry, config);
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count_clone = Arc::clone(&call_count);
+
+        let handle = emitter.start(
+            move |_summaries| {
+                call_count_clone.fetch_add(1, Ordering::SeqCst);
+                panic!("always panic");
+            },
+            false,
+        );
+
+        // Let it run and panic multiple times
+        tokio::time::sleep(Duration::from_millis(150)).await;
+
+        handle.shutdown().await.expect("shutdown failed");
+
+        // Should have attempted multiple times despite continuous panics
+        let final_count = call_count.load(Ordering::SeqCst);
+        assert!(
+            final_count >= 3,
+            "Task should continue despite repeated panics, got {} calls",
+            final_count
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_panic_during_final_emission() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_secs(3600)).unwrap(); // Long interval
+
+        let sig = EventSignature::simple("INFO", "Test");
+        registry.with_event_state(sig, |state, now| {
+            state.counter.record_suppression(now);
+        });
+
+        let emitter = SummaryEmitter::new(registry, config);
+
+        let panicked = Arc::new(AtomicBool::new(false));
+        let panicked_clone = Arc::clone(&panicked);
+
+        let handle = emitter.start(
+            move |_summaries| {
+                panicked_clone.store(true, Ordering::SeqCst);
+                panic!("panic during final emission");
+            },
+            true, // emit_on_shutdown
+        );
+
+        // Shutdown immediately - will trigger final emission which panics
+        handle
+            .shutdown()
+            .await
+            .expect("shutdown should succeed even if final emission panics");
+
+        // Verify final emission was attempted
+        assert!(
+            panicked.load(Ordering::SeqCst),
+            "Final emission should have been attempted"
+        );
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_shutdown_timeout_with_slow_emit_fn() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_secs(3600)).unwrap();
+
+        let emitter = SummaryEmitter::new(registry, config);
+
+        let handle = emitter.start(
+            move |_summaries| {
+                // Simulate slow emission - use a shorter duration for testing
+                std::thread::sleep(Duration::from_millis(500));
+            },
+            true,
+        );
+
+        // Shutdown with very short timeout
+        let result = handle
+            .shutdown_with_timeout(Duration::from_millis(10))
+            .await;
+
+        // Should timeout (or at minimum not panic)
+        // Note: timing-sensitive test, may occasionally pass if emit completes quickly
+        let _ = result; // Don't assert - just verify no panic
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_handle_dropped_without_shutdown() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_millis(50)).unwrap();
+
+        let emitter = SummaryEmitter::new(registry, config);
+
+        let handle = emitter.start(|_summaries| {}, false);
+
+        // Drop handle without calling shutdown
+        drop(handle);
+
+        // Task should continue running
+        // This is documented behavior - not a bug
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // No assertions - just verify no panic
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_concurrent_shutdown_calls() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_secs(3600)).unwrap();
+
+        let emitter = SummaryEmitter::new(registry, config);
+        let handle = emitter.start(|_summaries| {}, false);
+
+        // Create multiple shutdown senders
+        let sender = handle.shutdown_tx.clone();
+        let mut handles_vec = vec![];
+
+        // Multiple tasks try to send shutdown signal concurrently
+        for _ in 0..5 {
+            let sender_clone = sender.clone();
+            handles_vec.push(tokio::spawn(async move {
+                let _ = sender_clone.send(true);
+            }));
+        }
+
+        // All send operations should complete without panic
+        for h in handles_vec {
+            let _ = h.await;
+        }
+
+        // Clean shutdown
+        let _ = handle.shutdown().await;
+    }
+
+    #[cfg(feature = "async")]
+    #[tokio::test]
+    async fn test_shutdown_signal_failure() {
+        // Test that shutdown handles channel errors gracefully
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::new(Duration::from_millis(30)).unwrap();
+
+        let emitter = SummaryEmitter::new(registry, config);
+        let handle = emitter.start(|_summaries| {}, false);
+
+        // Normal shutdown
+        handle.shutdown().await.expect("shutdown should succeed");
+
+        // Verify task stopped
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

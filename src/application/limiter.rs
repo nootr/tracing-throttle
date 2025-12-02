@@ -212,6 +212,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::circuit_breaker::CircuitBreakerConfig;
     use crate::domain::policy::Policy;
     use crate::infrastructure::clock::SystemClock;
     use crate::infrastructure::mocks::MockClock;
@@ -363,5 +364,268 @@ mod tests {
 
         // Should have suppressed the rest
         assert!(total_suppressed >= 150);
+    }
+
+    #[test]
+    fn test_fail_open_when_circuit_breaker_open() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(1).unwrap(); // Very restrictive
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("ERROR", "Critical failure");
+
+        // First event allowed
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow);
+
+        // Open circuit breaker by recording many failures
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+        assert!(!cb.allow_request(), "Circuit breaker should be open");
+
+        // Even though policy would suppress (count exceeded),
+        // circuit breaker being open causes fail-open behavior
+        let decision = limiter.check_event(sig);
+        assert_eq!(
+            decision,
+            LimitDecision::Allow,
+            "Should fail open when circuit breaker is open"
+        );
+
+        // Verify metrics recorded as allowed
+        assert_eq!(limiter.metrics().events_allowed(), 2);
+    }
+
+    #[test]
+    fn test_fail_open_updates_metrics() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(1).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("ERROR", "Test");
+
+        // Open the circuit breaker
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+
+        // Process multiple events while circuit is open
+        for _ in 0..5 {
+            limiter.check_event(sig);
+        }
+
+        // All should be recorded as allowed (fail-open)
+        assert_eq!(limiter.metrics().events_allowed(), 5);
+        assert_eq!(limiter.metrics().events_suppressed(), 0);
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_allows_some_requests() {
+        use std::time::Duration;
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(1).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::with_config(CircuitBreakerConfig {
+            failure_threshold: 5,
+            recovery_timeout: Duration::from_millis(10),
+        }));
+        let limiter = RateLimiter::new(registry, Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("ERROR", "Test");
+
+        // Open circuit breaker
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+
+        // Wait for recovery timeout
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Circuit should now be half-open
+        // First request should be allowed through for testing
+        let decision = limiter.check_event(sig);
+        assert_eq!(decision, LimitDecision::Allow);
+
+        // Since the operation succeeded, circuit breaker records success
+        assert_eq!(cb.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn test_normal_operation_after_circuit_breaker_closes() {
+        use std::time::Duration;
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(2).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::with_config(CircuitBreakerConfig {
+            failure_threshold: 5,
+            recovery_timeout: Duration::from_millis(10),
+        }));
+        let limiter = RateLimiter::new(registry, Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("INFO", "Test");
+
+        // Open circuit breaker
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+
+        // Wait for recovery
+        std::thread::sleep(Duration::from_millis(20));
+
+        // Process events - should allow and record success
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow);
+
+        // Circuit breaker should be closed now
+        assert_eq!(cb.consecutive_failures(), 0);
+
+        // Normal rate limiting should work again
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow);
+        assert_eq!(limiter.check_event(sig), LimitDecision::Suppress);
+    }
+
+    #[test]
+    fn test_successful_operations_record_success_to_circuit_breaker() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(10).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("INFO", "Test");
+
+        // Process events successfully
+        for _ in 0..5 {
+            limiter.check_event(sig);
+        }
+
+        // Circuit breaker should have no failures recorded
+        assert_eq!(cb.consecutive_failures(), 0);
+    }
+
+    #[test]
+    fn test_concurrent_fail_open_behavior() {
+        use std::thread;
+
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(5).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::new());
+        let limiter = Arc::new(RateLimiter::new(registry, Metrics::new(), cb.clone()));
+
+        // Open circuit breaker
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+
+        let sig = EventSignature::simple("ERROR", "Concurrent fail-open test");
+        let mut handles = vec![];
+
+        // Spawn multiple threads checking events while circuit is open
+        for _ in 0..5 {
+            let limiter_clone = Arc::clone(&limiter);
+            let handle = thread::spawn(move || {
+                let mut all_allowed = true;
+                for _ in 0..10 {
+                    if limiter_clone.check_event(sig) != LimitDecision::Allow {
+                        all_allowed = false;
+                    }
+                }
+                all_allowed
+            });
+            handles.push(handle);
+        }
+
+        // All threads should see only Allow decisions (fail-open)
+        for handle in handles {
+            assert!(
+                handle.join().unwrap(),
+                "All events should be allowed when circuit is open"
+            );
+        }
+
+        // Total events = 5 threads * 10 events = 50
+        // All should be allowed (fail-open)
+        assert_eq!(limiter.metrics().events_allowed(), 50);
+        assert_eq!(limiter.metrics().events_suppressed(), 0);
+    }
+
+    #[test]
+    fn test_metrics_consistency_during_fail_open() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(2).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::new());
+        let limiter = RateLimiter::new(registry, Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("INFO", "Test");
+
+        // Normal operation
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow); // 1 allowed
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow); // 2 allowed
+        assert_eq!(limiter.check_event(sig), LimitDecision::Suppress); // 1 suppressed
+
+        // Open circuit breaker
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+
+        // Fail-open events
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow); // 3 allowed
+
+        // Verify metrics are consistent
+        let snapshot = limiter.metrics().snapshot();
+        assert_eq!(snapshot.events_allowed, 3);
+        assert_eq!(snapshot.events_suppressed, 1);
+        assert_eq!(snapshot.total_events(), 4);
+    }
+
+    #[test]
+    fn test_registry_state_unaffected_by_circuit_breaker() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(1).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let cb = Arc::new(CircuitBreaker::new());
+        let limiter = RateLimiter::new(registry.clone(), Metrics::new(), cb.clone());
+
+        let sig = EventSignature::simple("INFO", "Test");
+
+        // Allow first event, establish state
+        assert_eq!(limiter.check_event(sig), LimitDecision::Allow);
+
+        // Verify state exists
+        let initial_count = registry.with_event_state(sig, |state, _| state.counter.count());
+        assert_eq!(initial_count, 1);
+
+        // Open circuit breaker
+        for _ in 0..10 {
+            cb.record_failure();
+        }
+
+        // Process events while circuit is open (fail-open)
+        for _ in 0..5 {
+            limiter.check_event(sig);
+        }
+
+        // Registry state should NOT be modified during fail-open
+        // (circuit breaker short-circuits before registry access)
+        let final_count = registry.with_event_state(sig, |state, _| state.counter.count());
+        assert_eq!(
+            final_count, initial_count,
+            "Registry state should not change during fail-open"
+        );
     }
 }

@@ -412,4 +412,283 @@ mod tests {
         counter.reset(now);
         assert_eq!(counter.count(), 0);
     }
+
+    // === Edge Case and Overflow Tests ===
+
+    #[test]
+    fn test_clone_preserves_state() {
+        let now = Instant::now();
+        let counter = SuppressionCounter::new(now);
+
+        counter.record_suppression(now);
+        counter.record_suppression(now);
+
+        let cloned = counter.clone();
+
+        assert_eq!(counter.count(), cloned.count());
+        assert_eq!(counter.first_suppressed(), cloned.first_suppressed());
+        assert_eq!(counter.last_suppressed(), cloned.last_suppressed());
+    }
+
+    #[test]
+    fn test_clone_independence() {
+        let now = Instant::now();
+        let counter1 = SuppressionCounter::new(now);
+        let counter2 = counter1.clone();
+
+        // Modify counter1
+        counter1.record_suppression(now);
+
+        // counter2 should not be affected
+        assert_eq!(counter1.count(), 2);
+        assert_eq!(counter2.count(), 1);
+    }
+
+    #[test]
+    fn test_concurrent_clone_and_update() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let now = Instant::now();
+        let counter = Arc::new(SuppressionCounter::new(now));
+
+        let mut handles = vec![];
+
+        // Thread 1: Updates counter
+        let counter_clone1 = Arc::clone(&counter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..100 {
+                counter_clone1.record_suppression(now);
+            }
+        }));
+
+        // Thread 2: Clones counter repeatedly
+        let counter_clone2 = Arc::clone(&counter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..100 {
+                let _cloned = (*counter_clone2).clone();
+            }
+        }));
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Should have at least some updates
+        assert!(counter.count() > 1);
+    }
+
+    #[test]
+    fn test_concurrent_reset_and_read() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let now = Instant::now();
+        let counter = Arc::new(SuppressionCounter::new(now));
+
+        let mut handles = vec![];
+
+        // Thread 1: Repeatedly resets
+        let counter_clone1 = Arc::clone(&counter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..50 {
+                counter_clone1.reset(now);
+                thread::sleep(Duration::from_micros(10));
+            }
+        }));
+
+        // Thread 2: Repeatedly records
+        let counter_clone2 = Arc::clone(&counter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..50 {
+                counter_clone2.record_suppression(now);
+                thread::sleep(Duration::from_micros(10));
+            }
+        }));
+
+        // Thread 3: Repeatedly reads
+        let counter_clone3 = Arc::clone(&counter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..50 {
+                let _count = counter_clone3.count();
+                let _first = counter_clone3.first_suppressed();
+                let _last = counter_clone3.last_suppressed();
+                thread::sleep(Duration::from_micros(10));
+            }
+        }));
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // No assertions on final state due to race conditions,
+        // but test should not panic or produce invalid data
+    }
+
+    #[test]
+    fn test_very_large_suppression_count_stress() {
+        let now = Instant::now();
+        let counter = SuppressionCounter::new(now);
+
+        // Simulate a huge number of suppressions
+        for _ in 0..100_000 {
+            counter.record_suppression(now);
+        }
+
+        assert_eq!(counter.count(), 100_001);
+    }
+
+    #[test]
+    fn test_timestamp_persistence_over_time() {
+        let start = Instant::now();
+        let counter = SuppressionCounter::new(start);
+
+        // Record suppressions over time
+        for i in 1..=10 {
+            let timestamp = start + Duration::from_millis(i * 100);
+            counter.record_suppression(timestamp);
+        }
+
+        // First timestamp should be preserved
+        let first = counter.first_suppressed();
+        let duration_from_start = first.duration_since(start);
+        assert!(duration_from_start < Duration::from_millis(10));
+
+        // Last timestamp should be the most recent
+        let last = counter.last_suppressed();
+        let expected_last = start + Duration::from_millis(1000);
+        let duration_diff = last.duration_since(expected_last);
+        assert!(duration_diff < Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_epoch_overflow_handling() {
+        // Test with duration that would overflow u64 nanoseconds
+        let base = SuppressionCounter::base_instant();
+        let now = *base;
+
+        let counter = SuppressionCounter::new(now);
+
+        // Try to record at a time far in the future
+        // Duration::from_secs(u64::MAX / 1_000_000_000) would be ~584 years
+        // This tests saturation behavior
+        let far_future = now + Duration::from_secs(600 * 365 * 24 * 3600); // 600 years
+
+        counter.record_suppression(far_future);
+
+        // Should not panic, timestamps should saturate gracefully
+        let _first = counter.first_suppressed();
+        let _last = counter.last_suppressed();
+        assert!(counter.count() > 1);
+    }
+
+    #[test]
+    fn test_base_instant_consistency() {
+        // base_instant should be consistent across calls
+        let base1 = SuppressionCounter::base_instant();
+        let base2 = SuppressionCounter::base_instant();
+
+        assert_eq!(base1, base2, "base_instant should be consistent");
+    }
+
+    #[test]
+    fn test_nanos_conversion_roundtrip() {
+        let now = Instant::now();
+        let counter = SuppressionCounter::new(now);
+
+        // Convert to nanos and back
+        let first = counter.first_suppressed();
+        let last = counter.last_suppressed();
+
+        // Both should be close to 'now'
+        assert!(first.duration_since(now) < Duration::from_millis(10));
+        assert!(last.duration_since(now) < Duration::from_millis(10));
+    }
+
+    #[test]
+    fn test_atomic_ordering_visibility() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let now = Instant::now();
+        let counter = Arc::new(SuppressionCounter::new(now));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let counter_clone = Arc::clone(&counter);
+        let done_clone = Arc::clone(&done);
+
+        // Writer thread
+        let writer = thread::spawn(move || {
+            for i in 1..=100 {
+                counter_clone.record_suppression(now + Duration::from_millis(i));
+                thread::sleep(Duration::from_micros(10));
+            }
+            done_clone.store(true, Ordering::Release);
+        });
+
+        // Reader thread
+        let counter_clone2 = Arc::clone(&counter);
+        let done_clone2 = Arc::clone(&done);
+        let reader = thread::spawn(move || {
+            let mut last_count = 1;
+            while !done_clone2.load(Ordering::Acquire) {
+                let count = counter_clone2.count();
+                // Count should never decrease
+                assert!(count >= last_count, "Count should be monotonic");
+                last_count = count;
+                thread::sleep(Duration::from_micros(10));
+            }
+        });
+
+        writer.join().unwrap();
+        reader.join().unwrap();
+
+        // Final count should be 101 (1 initial + 100 recorded)
+        assert_eq!(counter.count(), 101);
+    }
+
+    #[test]
+    fn test_summary_with_zero_duration() {
+        let sig = EventSignature::simple("INFO", "Test");
+        let now = Instant::now();
+        let counter = SuppressionCounter::new(now);
+
+        // Create summary immediately - same timestamp for first and last
+        let summary = SuppressionSummary::from_counter(sig, &counter);
+
+        assert_eq!(summary.count, 1);
+        assert_eq!(summary.duration, Duration::from_secs(0));
+        assert_eq!(summary.first_suppressed, summary.last_suppressed);
+    }
+
+    #[test]
+    #[cfg(feature = "redis-storage")]
+    fn test_snapshot_roundtrip() {
+        let now = Instant::now();
+        let counter = SuppressionCounter::new(now);
+
+        counter.record_suppression(now + Duration::from_secs(1));
+        counter.record_suppression(now + Duration::from_secs(2));
+
+        let snapshot = counter.snapshot();
+
+        let restored = SuppressionCounter::from_snapshot(
+            snapshot.suppressed_count,
+            snapshot.first_suppressed,
+            snapshot.last_suppressed,
+        );
+
+        assert_eq!(counter.count(), restored.count());
+        // Note: timestamps may have slight differences due to serialization precision
+        let first_diff = counter
+            .first_suppressed()
+            .duration_since(restored.first_suppressed());
+        let last_diff = counter
+            .last_suppressed()
+            .duration_since(restored.last_suppressed());
+
+        assert!(first_diff < Duration::from_millis(1));
+        assert!(last_diff < Duration::from_millis(1));
+    }
 }

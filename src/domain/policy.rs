@@ -1312,4 +1312,27 @@ mod tests {
         // 6th should be suppressed
         assert_eq!(policy.register_event(future2), PolicyDecision::Suppress);
     }
+
+    #[test]
+    fn test_time_window_with_many_events() {
+        // Fill time window with maximum events
+        let mut policy = TimeWindowPolicy::new(100, Duration::from_secs(60)).unwrap();
+        let now = Instant::now();
+
+        // Add 100 events
+        for i in 0..100 {
+            let timestamp = now + Duration::from_millis(i * 10);
+            policy.register_event(timestamp);
+        }
+
+        // Verify window is full
+        assert_eq!(
+            policy.register_event(now + Duration::from_millis(1000)),
+            PolicyDecision::Suppress
+        );
+
+        // After window expires, should allow again
+        let later = now + Duration::from_secs(70);
+        assert_eq!(policy.register_event(later), PolicyDecision::Allow);
+    }
 }

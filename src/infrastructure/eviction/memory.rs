@@ -86,12 +86,16 @@ mod tests {
             EvictionCandidate {
                 key: "key2".to_string(),
                 value: 200,
-                last_access: now - std::time::Duration::from_secs(10),
+                last_access: now
+                    .checked_sub(std::time::Duration::from_secs(10))
+                    .unwrap_or(now),
             },
             EvictionCandidate {
                 key: "key3".to_string(),
                 value: 300,
-                last_access: now - std::time::Duration::from_secs(5),
+                last_access: now
+                    .checked_sub(std::time::Duration::from_secs(5))
+                    .unwrap_or(now),
             },
         ];
 

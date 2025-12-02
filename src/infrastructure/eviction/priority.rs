@@ -396,11 +396,15 @@ mod tests {
         let policy = PriorityEviction::new(10, priority_fn);
         let now = Instant::now();
 
+        let old_time = now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap_or(now);
+
         let candidates = vec![
             EvictionCandidate {
                 key: "old_high_priority".to_string(),
                 value: 100,
-                last_access: now - std::time::Duration::from_secs(3600), // 1 hour ago
+                last_access: old_time, // 1 hour ago (or earlier)
             },
             EvictionCandidate {
                 key: "new_low_priority".to_string(),

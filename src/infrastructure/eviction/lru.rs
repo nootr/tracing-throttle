@@ -56,12 +56,16 @@ mod tests {
             EvictionCandidate {
                 key: "key2".to_string(),
                 value: 200,
-                last_access: now - std::time::Duration::from_secs(10),
+                last_access: now
+                    .checked_sub(std::time::Duration::from_secs(10))
+                    .unwrap_or(now),
             },
             EvictionCandidate {
                 key: "key3".to_string(),
                 value: 300,
-                last_access: now - std::time::Duration::from_secs(5),
+                last_access: now
+                    .checked_sub(std::time::Duration::from_secs(5))
+                    .unwrap_or(now),
             },
         ];
 
@@ -157,6 +161,13 @@ mod tests {
         let policy = LruEviction::new(10);
         let now = Instant::now();
 
+        let ancient = now
+            .checked_sub(std::time::Duration::from_secs(365 * 24 * 3600))
+            .unwrap_or(now);
+        let middle = now
+            .checked_sub(std::time::Duration::from_secs(3600))
+            .unwrap_or(now);
+
         let candidates = vec![
             EvictionCandidate {
                 key: "recent".to_string(),
@@ -166,12 +177,12 @@ mod tests {
             EvictionCandidate {
                 key: "ancient".to_string(),
                 value: 2,
-                last_access: now - std::time::Duration::from_secs(365 * 24 * 3600), // 1 year ago
+                last_access: ancient, // 1 year ago (or earliest possible)
             },
             EvictionCandidate {
                 key: "middle".to_string(),
                 value: 3,
-                last_access: now - std::time::Duration::from_secs(3600), // 1 hour ago
+                last_access: middle, // 1 hour ago (or earlier)
             },
         ];
 
@@ -193,7 +204,9 @@ mod tests {
             .map(|i| EvictionCandidate {
                 key: format!("key{}", i),
                 value: i,
-                last_access: now - std::time::Duration::from_secs(i as u64),
+                last_access: now
+                    .checked_sub(std::time::Duration::from_secs(i as u64))
+                    .unwrap_or(now),
             })
             .collect();
 
@@ -215,7 +228,9 @@ mod tests {
             EvictionCandidate {
                 key: "past".to_string(),
                 value: 1,
-                last_access: now - std::time::Duration::from_secs(10),
+                last_access: now
+                    .checked_sub(std::time::Duration::from_secs(10))
+                    .unwrap_or(now),
             },
             EvictionCandidate {
                 key: "present".to_string(),

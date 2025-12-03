@@ -7,6 +7,17 @@
 //! Event field **values** are NOT included in signatures by default - use
 //! `.with_event_fields()` to include specific fields.
 //!
+//! ## Best Practices
+//!
+//! For detailed guidance on using `tracing-throttle` effectively, including:
+//! - **How event signatures work** and why message templates matter
+//! - **Choosing the right policy** for your use case
+//! - **Per-entity throttling** patterns (per-user, per-endpoint, etc.)
+//! - **Memory management** strategies for high-cardinality scenarios
+//! - **Common anti-patterns** to avoid
+//!
+//! See the [Best Practices Guide](https://github.com/nootr/tracing-throttle/blob/main/BEST_PRACTICES.md)
+//! for a comprehensive guide with examples.
 //!
 //! ## Quick Start
 //!

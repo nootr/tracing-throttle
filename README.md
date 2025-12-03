@@ -14,6 +14,7 @@
 
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Best Practices](#best-practices)
 - [Configuration](#configuration)
   - [Rate Limiting Policies](#rate-limiting-policies)
   - [Eviction Strategies](#eviction-strategies)
@@ -92,6 +93,17 @@ for i in 0..1000 {
 }
 // First 50 emitted immediately (burst), then 1/sec (60/min) sustained rate
 ```
+
+## Best Practices
+
+For detailed guidance on using `tracing-throttle` effectively, including:
+- **How event signatures work** and why message templates matter
+- **Choosing the right policy** for your use case
+- **Per-entity throttling** patterns (per-user, per-endpoint, etc.)
+- **Memory management** strategies for high-cardinality scenarios
+- **Common anti-patterns** to avoid
+
+See **[BEST_PRACTICES.md](BEST_PRACTICES.md)** for a comprehensive guide with examples.
 
 ## Configuration
 

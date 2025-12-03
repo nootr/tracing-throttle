@@ -290,3 +290,43 @@ fn test_excluded_fields_with_span_context() {
     // Only 2 logged - request_id excluded
     assert_eq!(capture.count(), 2, "Excluded fields work with span context");
 }
+
+#[test]
+fn test_excluded_field_not_present() {
+    // Test that excluding a field that isn't present doesn't cause issues
+    // Events should still be throttled correctly based on fields that ARE present
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(2).unwrap())
+        .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+
+    let rate_limit_filter = rate_limit.clone();
+    let subscriber = tracing_subscriber::registry()
+        .with(rate_limit)
+        .with(capture.clone().with_filter(rate_limit_filter));
+
+    tracing::subscriber::with_default(subscriber, || {
+        // Events with same user_id, no request_id or trace_id present
+        // Should be throttled together (same signature)
+        for _ in 0..5 {
+            tracing::error!(user_id = 123, "Failed to fetch user");
+        }
+
+        // Events with different user_id, still no request_id or trace_id
+        // Should have different signature (different user_id)
+        for _ in 0..5 {
+            tracing::error!(user_id = 456, "Failed to fetch user");
+        }
+    });
+
+    // 4 total: 2 for user_id=123, 2 for user_id=456
+    // Excluded fields not being present should not affect throttling
+    assert_eq!(
+        capture.count(),
+        4,
+        "Excluded fields that aren't present should not affect signature"
+    );
+}

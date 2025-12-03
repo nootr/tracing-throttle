@@ -98,6 +98,39 @@
 //!
 //! **See `tests/event_fields.rs` for complete examples.**
 //!
+//! ## Exempting Critical Events
+//!
+//! Some events should never be throttled, such as security alerts, audit logs, or
+//! compliance events. Use `.with_exempt_targets()` to bypass rate limiting for specific targets:
+//!
+//! ```rust,no_run
+//! # use tracing_throttle::TracingRateLimitLayer;
+//! let layer = TracingRateLimitLayer::builder()
+//!     .with_exempt_targets(vec![
+//!         "myapp::security".to_string(),
+//!         "myapp::audit".to_string(),
+//!     ])
+//!     .build()
+//!     .unwrap();
+//! ```
+//!
+//! Events from exempt targets always pass through:
+//!
+//! ```rust,no_run
+//! # use tracing::{info, error};
+//! // These are never throttled (exempt target)
+//! error!(target: "myapp::security", "Security breach detected");
+//! info!(target: "myapp::audit", user = "alice", action = "login", "Audit log");
+//!
+//! // These get throttled normally
+//! info!("Regular application log");
+//! ```
+//!
+//! Exempt events still count toward metrics (recorded as "allowed"), ensuring
+//! visibility into total event volume.
+//!
+//! **See `tests/exempt_targets.rs` for complete examples.**
+//!
 //! ## Observability
 //!
 //! Monitor rate limiting behavior with built-in metrics:

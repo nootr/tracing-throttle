@@ -82,6 +82,7 @@ pub struct TracingRateLimitLayerBuilder {
     span_context_fields: Vec<String>,
     event_fields: Vec<String>,
     eviction_strategy: Option<EvictionStrategy>,
+    exempt_targets: BTreeSet<String>,
 }
 
 /// Eviction strategy configuration for the rate limit layer.
@@ -365,6 +366,52 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
+    /// Exempt specific targets from rate limiting.
+    ///
+    /// Events from the specified targets will bypass rate limiting entirely and
+    /// always be allowed through. This is useful for ensuring critical logs (e.g.,
+    /// security events, audit logs) are never suppressed.
+    ///
+    /// Targets are matched exactly against the event's target (module path).
+    /// Duplicate targets are automatically removed, and empty targets are filtered out.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use tracing_throttle::TracingRateLimitLayer;
+    /// // Never throttle security or audit logs
+    /// let layer = TracingRateLimitLayer::builder()
+    ///     .with_exempt_targets(vec![
+    ///         "myapp::security".to_string(),
+    ///         "myapp::audit".to_string(),
+    ///     ])
+    ///     .build()
+    ///     .unwrap();
+    /// ```
+    ///
+    /// # Usage with Events
+    ///
+    /// ```no_run
+    /// # use tracing::error;
+    /// // Explicitly set target - this event bypasses throttling
+    /// error!(target: "myapp::security", "Security breach detected");
+    ///
+    /// // Or use the module's default target
+    /// mod security {
+    ///     use tracing::warn;
+    ///     pub fn check() {
+    ///         // Target is automatically "myapp::security" - bypasses throttling
+    ///         warn!("Suspicious activity detected");
+    ///     }
+    /// }
+    /// ```
+    pub fn with_exempt_targets(mut self, targets: Vec<String>) -> Self {
+        // Deduplicate and filter out empty targets
+        let unique_targets: BTreeSet<_> = targets.into_iter().filter(|t| !t.is_empty()).collect();
+        self.exempt_targets = unique_targets;
+        self
+    }
+
     /// Set a custom eviction strategy for signature management.
     ///
     /// Controls which signatures are evicted when storage limits are reached.
@@ -513,6 +560,7 @@ impl TracingRateLimitLayerBuilder {
             limiter,
             span_context_fields: Arc::new(self.span_context_fields),
             event_fields: Arc::new(self.event_fields),
+            exempt_targets: Arc::new(self.exempt_targets),
             #[cfg(feature = "async")]
             emitter_handle,
             #[cfg(not(feature = "async"))]
@@ -536,6 +584,7 @@ where
     limiter: RateLimiter<S>,
     span_context_fields: Arc<Vec<String>>,
     event_fields: Arc<Vec<String>>,
+    exempt_targets: Arc<BTreeSet<String>>,
     #[cfg(feature = "async")]
     emitter_handle: Arc<Mutex<Option<EmitterHandle>>>,
     #[cfg(not(feature = "async"))]
@@ -738,6 +787,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             span_context_fields: Vec::new(),
             event_fields: Vec::new(),
             eviction_strategy: None,
+            exempt_targets: BTreeSet::new(),
         }
     }
 
@@ -805,6 +855,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             limiter,
             span_context_fields: Arc::new(Vec::new()),
             event_fields: Arc::new(Vec::new()),
+            exempt_targets: Arc::new(BTreeSet::new()),
             #[cfg(feature = "async")]
             emitter_handle: Arc::new(Mutex::new(None)),
             #[cfg(not(feature = "async"))]
@@ -833,12 +884,21 @@ where
     }
 
     fn event_enabled(&self, event: &tracing::Event<'_>, cx: &Context<'_, Sub>) -> bool {
+        let metadata_obj = event.metadata();
+
+        // Check if this target is exempt from rate limiting
+        // Skip the lookup if no exempt targets are configured (common case)
+        if !self.exempt_targets.is_empty() && self.exempt_targets.contains(metadata_obj.target()) {
+            // Exempt targets bypass rate limiting entirely
+            self.limiter.metrics().record_allowed();
+            return true;
+        }
+
         // Combine span context and event fields
         let mut combined_fields = self.extract_span_context(cx);
         let event_fields = self.extract_event_fields(event);
         combined_fields.extend(event_fields);
 
-        let metadata_obj = event.metadata();
         let signature = self.compute_signature(metadata_obj, &combined_fields);
 
         #[cfg(feature = "human-readable")]
@@ -949,6 +1009,54 @@ mod tests {
         assert_eq!(layer.event_fields.len(), 2);
         assert!(layer.event_fields.iter().any(|f| f == "error_code"));
         assert!(layer.event_fields.iter().any(|f| f == "status"));
+    }
+
+    #[test]
+    fn test_exempt_targets_deduplication() {
+        let layer = TracingRateLimitLayer::builder()
+            .with_exempt_targets(vec![
+                "myapp::security".to_string(),
+                "myapp::security".to_string(), // duplicate
+                "myapp::audit".to_string(),
+                "".to_string(),                // empty, should be filtered
+                "myapp::security".to_string(), // another duplicate
+            ])
+            .build()
+            .unwrap();
+
+        // Should only have 2 unique targets: security and audit
+        assert_eq!(layer.exempt_targets.len(), 2);
+        assert!(layer.exempt_targets.contains("myapp::security"));
+        assert!(layer.exempt_targets.contains("myapp::audit"));
+    }
+
+    #[test]
+    fn test_exempt_targets_bypass_rate_limiting() {
+        let rate_limit = TracingRateLimitLayer::builder()
+            .with_policy(Policy::count_based(2).unwrap())
+            .with_exempt_targets(vec!["myapp::security".to_string()])
+            .build()
+            .unwrap();
+
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(rate_limit.clone()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            // Regular logs get throttled after 2 (same callsite = same signature)
+            for _ in 0..3 {
+                info!("Regular log"); // First 2 allowed, 3rd suppressed
+            }
+
+            // Security logs are never throttled (exempt target)
+            for _ in 0..4 {
+                info!(target: "myapp::security", "Security event"); // All 4 allowed
+            }
+        });
+
+        // Verify metrics
+        let metrics = rate_limit.metrics();
+        assert_eq!(metrics.events_allowed(), 6); // 2 regular + 4 exempt
+        assert_eq!(metrics.events_suppressed(), 1); // 1 regular suppressed
     }
 
     #[test]
@@ -1214,6 +1322,7 @@ mod tests {
             limiter,
             span_context_fields: Arc::new(Vec::new()),
             event_fields: Arc::new(Vec::new()),
+            exempt_targets: Arc::new(BTreeSet::new()),
             #[cfg(feature = "async")]
             emitter_handle: Arc::new(Mutex::new(None)),
             #[cfg(not(feature = "async"))]

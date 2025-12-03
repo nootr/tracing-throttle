@@ -5,6 +5,135 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2025-12-03
+
+### BREAKING CHANGES
+
+**Field Inclusion Logic Inverted**
+
+Event field values are now **included in signatures by default** (previously excluded by default).
+
+This breaking change addresses a fundamental UX issue: the old behavior was unintuitive and dangerous. When users wrote `info!(user_id = 123, "User login")`, they expected `user_id=123` and `user_id=456` to be treated as different events - because they ARE semantically different events. The old behavior silently ignored field values, making logs appear broken.
+
+**Before (v0.3.x):**
+```rust
+// Fields EXCLUDED by default - counter-intuitive!
+let layer = TracingRateLimitLayer::builder()
+    .with_policy(Policy::count_based(5).unwrap())
+    .build()
+    .unwrap();
+
+info!(user_id = 123, "User login");  // Same signature
+info!(user_id = 456, "User login");  // Same signature (WRONG - throttled together!)
+
+// Had to opt-in to include fields:
+let layer = TracingRateLimitLayer::builder()
+    .with_event_fields(vec!["user_id".to_string()])  // Explicit inclusion
+    .build()
+    .unwrap();
+```
+
+**After (v0.4.0):**
+```rust
+// Fields INCLUDED by default - intuitive and correct!
+let layer = TracingRateLimitLayer::builder()
+    .with_policy(Policy::count_based(5).unwrap())
+    .build()
+    .unwrap();
+
+info!(user_id = 123, "User login");  // Signature includes user_id=123
+info!(user_id = 456, "User login");  // Different signature (CORRECT!)
+
+// Opt-out for high-cardinality fields:
+let layer = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
+    .build()
+    .unwrap();
+```
+
+**Migration Guide:**
+
+1. **If you were using default configuration** (no `.with_event_fields()`):
+   - Signatures now include ALL field values
+   - Identify high-cardinality fields (request_id, trace_id, timestamps, UUIDs)
+   - Exclude them explicitly:
+     ```rust
+     .with_excluded_fields(vec![
+         "request_id".to_string(),
+         "trace_id".to_string(),
+         "span_id".to_string(),
+     ])
+     ```
+
+2. **If you were using `.with_event_fields()`**:
+   - Remove `.with_event_fields()` calls (method no longer exists)
+   - Invert the logic: exclude all OTHER fields instead:
+     ```rust
+     // Before:
+     .with_event_fields(vec!["user_id".to_string()])
+
+     // After - exclude everything EXCEPT user_id:
+     .with_excluded_fields(vec![
+         "request_id".to_string(),
+         "timestamp".to_string(),
+         // ... list all OTHER fields
+     ])
+     ```
+   - **Note:** If you were including many fields, it's now simpler to exclude the few high-cardinality ones
+
+3. **Memory Management Considerations:**
+   - Monitor signature count with `.snapshot().signature_count()`
+   - Set appropriate `.with_max_signatures()` limit based on cardinality
+   - See updated documentation for cardinality analysis
+
+### Removed
+
+- **`.with_event_fields()`** - Replaced by `.with_excluded_fields()` (inverted logic)
+
+### Added
+
+- **`.with_excluded_fields()`** - Opt-out from including specific fields in signatures
+  - Use for high-cardinality fields (request_id, trace_id, UUIDs, timestamps)
+  - Prevents signature explosion
+  - Example: `.with_excluded_fields(vec!["request_id".to_string()])`
+
+### Changed
+
+- **Default signature computation** - Now includes `(level, target, message, ALL field values)`
+  - Previously: `(level, target, message)` only
+  - Field values define semantic meaning, so they belong in signatures
+  - More intuitive: `user_id=123` and `user_id=456` are different events
+
+### Documentation
+
+- **lib.rs module documentation** - Updated to reflect new field inclusion behavior
+- **Quick Start example** - Added `.with_excluded_fields()` demonstration
+- **Memory Management section** - Rewrote cardinality analysis for new behavior
+- **Cardinality table** - Updated examples showing exclusion patterns
+- **All code examples** - Consistently use `.with_excluded_fields()` API
+- **examples/basic.rs** - Updated to use `.with_excluded_fields()`
+- **examples/policies.rs** - Updated to use `.with_excluded_fields()`
+
+### Fixed
+
+- **Unintuitive field handling** - Field values now correctly included by default
+- **Silent field value ignoring** - Users no longer surprised by fields being excluded
+- **Documentation consistency** - All docs now consistently describe v0.4.0 behavior
+
+### Rationale
+
+This breaking change was necessary because:
+
+1. **Principle of Least Surprise**: When users write `info!(user_id = 123, "Login")`, they expect the `user_id` value to matter. Ignoring it by default violated this principle.
+
+2. **Semantic Correctness**: Field values define the semantic meaning of events. `user_id=123` and `user_id=456` are fundamentally different events and should be throttled independently.
+
+3. **Safer Defaults**: The old behavior could silently cause incorrect throttling. The new behavior is correct by default, with explicit opt-out for performance tuning.
+
+4. **User Feedback**: Real-world testing revealed confusion about why fields were being ignored, leading to perceived bugs in log output.
+
+5. **Rust Idioms**: Explicit exclusion follows Rust's philosophy: be explicit about what you DON'T want, rather than what you DO want.
+
 ## [0.3.1] - 2025-12-02
 
 ### Added

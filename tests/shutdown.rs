@@ -28,24 +28,24 @@ async fn test_graceful_shutdown_with_active_logging() {
 
     tracing::subscriber::set_global_default(subscriber).expect("Failed to set subscriber");
 
-    // Generate some logs
-    for i in 0..20 {
-        info!("Processing item {}", i);
+    // Generate some logs - use same message so they share a signature
+    for _ in 0..20 {
+        info!("Processing item");
     }
 
-    // Only first 5 should pass through
+    // Only first 5 should pass through (count policy limit is 5)
     assert_eq!(capture.count(), 5);
 
     // In a real app, shutdown would be triggered by signal handler
     // Here we just verify the layer continues working
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Generate more logs
-    for i in 20..30 {
-        warn!("Warning for item {}", i);
+    // Generate more logs - different level so different signature
+    for _ in 0..10 {
+        warn!("Warning for item");
     }
 
-    // Should have 5 info + 5 warn = 10 total
+    // Should have 5 info + 5 warn = 10 total (different signatures due to level)
     assert_eq!(capture.count(), 10);
 }
 

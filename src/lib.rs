@@ -3,9 +3,9 @@
 //! High-performance log deduplication and rate limiting for the `tracing` ecosystem.
 //!
 //! This crate provides a `tracing::Layer` that suppresses repetitive log events based on
-//! configurable policies. Events are deduplicated by their signature (level, target, and message).
-//! Event field **values** are NOT included in signatures by default - use
-//! `.with_event_fields()` to include specific fields.
+//! configurable policies. Events are deduplicated by their signature (level, target, message,
+//! and **ALL field values** by default). Use `.with_excluded_fields()` to exclude high-cardinality
+//! fields like `request_id` or `trace_id`.
 //!
 //! ## Best Practices
 //!
@@ -33,6 +33,7 @@
 //! let rate_limit = TracingRateLimitLayer::builder()
 //!     .with_policy(Policy::token_bucket(100.0, 10.0).unwrap())  // 100 burst, 600/min
 //!     .with_max_signatures(50_000)  // Custom limit
+//!     .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
 //!     .with_summary_interval(Duration::from_secs(30))
 //!     .build()
 //!     .unwrap();
@@ -69,31 +70,38 @@
 //! - Event level (INFO, WARN, ERROR, etc.)
 //! - Target (module path)
 //! - Message text
+//! - **ALL event field values**
 //!
-//! **Event field VALUES are NOT included by default.** This means:
+//! **Event field values ARE included by default.** This ensures that semantically different
+//! events are not accidentally deduplicated:
 //!
 //! ```rust,no_run
-//! # use tracing::info;
-//! info!(user_id = 1, "Login");  // Signature: (INFO, target, "Login")
-//! info!(user_id = 2, "Login");  // SAME signature - will be rate limited together!
+//! # use tracing::error;
+//! error!(user_id = 123, "Failed to fetch user");  // Signature: (ERROR, target, "Failed to fetch user", user_id=123)
+//! error!(user_id = 456, "Failed to fetch user");  // DIFFERENT signature - both logged!
 //! ```
 //!
-//! To rate-limit events per field value, use `.with_event_fields()`:
+//! These are **different failures** for different users and should both be logged.
+//!
+//! ### Excluding High-Cardinality Fields
+//!
+//! To prevent memory issues from high-cardinality fields that don't change the event's meaning
+//! (like `request_id`, `trace_id`, `timestamp`), use `.with_excluded_fields()`:
 //!
 //! ```rust,no_run
 //! # use tracing_throttle::TracingRateLimitLayer;
 //! let layer = TracingRateLimitLayer::builder()
-//!     .with_event_fields(vec!["user_id".to_string()])  // Include user_id in signature
+//!     .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
 //!     .build()
 //!     .unwrap();
 //! ```
 //!
-//! Now each user_id gets its own rate limit:
+//! Now events with the same meaningful fields but different request IDs are deduplicated:
 //!
 //! ```rust,no_run
-//! # use tracing::info;
-//! info!(user_id = 1, "Login");  // Signature: (INFO, target, "Login", user_id=1)
-//! info!(user_id = 2, "Login");  // Signature: (INFO, target, "Login", user_id=2)
+//! # use tracing::error;
+//! error!(user_id = 123, request_id = "abc", "Failed to fetch user");  // Logged
+//! error!(user_id = 123, request_id = "def", "Failed to fetch user");  // Throttled (same user_id)
 //! ```
 //!
 //! **See `tests/event_fields.rs` for complete examples.**
@@ -307,22 +315,23 @@
 //!
 //! **What affects signature cardinality?**
 //!
-//! By default, signatures are computed from `(level, target, message)` only.
-//! Field values are NOT included unless configured with `.with_event_fields()`.
+//! By default, signatures include `(level, target, message, ALL field values)`.
+//! This means each unique combination of field values creates a new signature.
 //!
 //! ```rust,no_run
 //! # use tracing::info;
-//! // Low cardinality (good) - same signature for all occurrences
+//! // Low cardinality (good) - no fields, same signature every time
 //! info!("User login successful");  // Always same signature
-//! info!(user_id = 123, "User login");  // SAME signature (user_id not included by default)
 //!
-//! // Medium cardinality - if you configure .with_event_fields(vec!["user_id".to_string()])
-//! # let id = 123;
-//! info!(user_id = %id, "User login");  // One signature per unique user_id
+//! // Medium cardinality - one signature per unique user_id value
+//! info!(user_id = 123, "User login");  // Signature includes user_id=123
+//! info!(user_id = 456, "User login");  // DIFFERENT signature (user_id=456)
 //!
-//! // High cardinality (danger) - if you configure .with_event_fields(vec!["request_id".to_string()])
+//! // High cardinality (danger) - new signature for every request
 //! # let uuid = "abc";
 //! info!(request_id = %uuid, "Processing");  // New signature every time!
+//! // Solution: Exclude high-cardinality fields
+//! // .with_excluded_fields(vec!["request_id".to_string()])
 //! ```
 //!
 //! **Cardinality examples:**
@@ -330,10 +339,10 @@
 //! | Pattern | Config | Unique Signatures | Memory Impact |
 //! |---------|--------|-------------------|---------------|
 //! | Static messages only | Default | ~10-100 | Minimal (~10 KB) |
-//! | Messages with fields | Default (fields ignored) | ~10-100 | Minimal (~10 KB) |
-//! | `.with_event_fields(["user_id"])` | Stable IDs | ~1,000-10,000 | Low (1-2 MB) |
-//! | `.with_event_fields(["session_id"])` | Session IDs | ~10,000-100,000 | Medium (10-25 MB) |
-//! | `.with_event_fields(["request_id"])` | UUIDs | Unbounded | **High risk** |
+//! | Messages with stable IDs | Default | ~1,000-10,000 | Low (1-2 MB) |
+//! | Per-user + per-endpoint | Default | ~100,000+ | Medium (10-25 MB) |
+//! | With request_id field | Default | Unbounded | **High risk** |
+//! | With `.with_excluded_fields(["request_id"])` | Exclude UUIDs | ~1,000-10,000 | Low (1-2 MB) |
 //!
 //! **How to estimate your cardinality:**
 //!

@@ -41,7 +41,7 @@ High-volume Rust applications often suffer from repetitive or bursty log events 
 - **Signal loss**: Important logs get buried in noise
 - **Observability gaps**: Rate limiting at the collector level discards logs silently
 
-`tracing-throttle` solves this at the source by providing **signature-based rate limiting** as a drop-in `tracing::Layer`. Events with identical signatures (level, message, and fields) are deduplicated and throttled together, while unique events pass through unaffected.
+`tracing-throttle` solves this at the source by providing **signature-based rate limiting** as a drop-in `tracing::Layer`. Events with identical signatures (level, message, target, and **all field values**) are deduplicated and throttled together, while unique events pass through unaffected.
 
 ### Why tracing-throttle?
 
@@ -54,11 +54,11 @@ High-volume Rust applications often suffer from repetitive or bursty log events 
 
 ### How It Works
 
-The layer computes a signature for each log event based on its level, message template, target, and structured fields. Each unique signature gets its own rate limiter that applies your chosen policy (token bucket, time-window, count-based, etc.). This means:
+The layer computes a signature for each log event based on its level, message template, target, and all structured field values (by default). Each unique signature gets its own rate limiter that applies your chosen policy (token bucket, time-window, count-based, etc.). This means:
 
-- Identical errors are throttled together
-- Different errors are limited independently
-- Dynamic fields in messages don't break deduplication
+- Events with different field values are treated as distinct (no accidental deduplication)
+- Events with identical field values are throttled together
+- You can exclude high-cardinality fields (like `request_id`) to reduce memory usage
 - Per-signature statistics enable targeted investigation
 
 ## Installation
@@ -67,7 +67,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-tracing-throttle = "0.3"
+tracing-throttle = "0.4"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.20"
 ```
@@ -88,10 +88,17 @@ tracing_subscriber::registry()
     .init();
 
 // Now your logs are rate limited!
-for i in 0..1000 {
-    tracing::info!("Processing item {}", i);
+// Each different user_id creates a unique signature - NOT throttled together
+for user_id in 0..1000 {
+    tracing::error!(user_id = user_id, "Failed to fetch user");
 }
-// First 50 emitted immediately (burst), then 1/sec (60/min) sustained rate
+// All 1000 logged - they have different user_id values, so different signatures
+
+// But duplicate errors ARE throttled
+for _ in 0..1000 {
+    tracing::error!(user_id = 123, "Failed to fetch user");
+}
+// Only first 50 logged immediately, then 1/sec (same user_id = same signature)
 ```
 
 ## Best Practices

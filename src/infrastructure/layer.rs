@@ -80,7 +80,7 @@ pub struct TracingRateLimitLayerBuilder {
     #[cfg(feature = "async")]
     summary_formatter: Option<SummaryFormatter>,
     span_context_fields: Vec<String>,
-    event_fields: Vec<String>,
+    excluded_fields: BTreeSet<String>,
     eviction_strategy: Option<EvictionStrategy>,
     exempt_targets: BTreeSet<String>,
 }
@@ -326,11 +326,14 @@ impl TracingRateLimitLayerBuilder {
         self
     }
 
-    /// Include event fields in event signatures.
+    /// Exclude specific fields from event signatures.
     ///
-    /// When specified, the layer will extract these fields from events themselves
-    /// and include them in the event signature. This enables rate limiting per
-    /// error code, status, endpoint, or any other event-level field.
+    /// By default, ALL event fields are included in signatures. This ensures that
+    /// events with different field values are treated as distinct events, preventing
+    /// accidental loss of meaningful log data.
+    ///
+    /// Use this method to exclude high-cardinality fields that don't change the
+    /// semantic meaning of the event (e.g., request_id, timestamp, trace_id).
     ///
     /// Duplicate field names are automatically removed, and empty field names are filtered out.
     ///
@@ -338,31 +341,36 @@ impl TracingRateLimitLayerBuilder {
     ///
     /// ```no_run
     /// # use tracing_throttle::TracingRateLimitLayer;
-    /// // Rate limit separately per error_code
+    /// // Exclude request_id so events with same user_id are deduplicated
     /// let layer = TracingRateLimitLayer::builder()
-    ///     .with_event_fields(vec!["error_code".to_string()])
-    ///     .build()
-    ///     .unwrap();
-    ///
-    /// // Rate limit per status and endpoint
-    /// let layer = TracingRateLimitLayer::builder()
-    ///     .with_event_fields(vec!["status".to_string(), "endpoint".to_string()])
+    ///     .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
     ///     .build()
     ///     .unwrap();
     /// ```
     ///
-    /// # Usage with Events
+    /// # Default Behavior (ALL fields included)
     ///
     /// ```no_run
     /// # use tracing::error;
-    /// // Events with different error codes are rate limited independently
-    /// error!(error_code = "AUTH_FAILED", "Authentication failed");
-    /// error!(error_code = "TIMEOUT", "Request timeout");
+    /// // These are DIFFERENT events (different user_id values)
+    /// error!(user_id = 123, "Failed to fetch user");
+    /// error!(user_id = 456, "Failed to fetch user");
+    /// // Both are logged - they have distinct signatures
     /// ```
-    pub fn with_event_fields(mut self, fields: Vec<String>) -> Self {
+    ///
+    /// # With Exclusions
+    ///
+    /// ```no_run
+    /// # use tracing::error;
+    /// // Exclude request_id from signature
+    /// error!(user_id = 123, request_id = "abc", "Failed to fetch user");
+    /// error!(user_id = 123, request_id = "def", "Failed to fetch user");
+    /// // Second is throttled - same user_id, request_id excluded from signature
+    /// ```
+    pub fn with_excluded_fields(mut self, fields: Vec<String>) -> Self {
         // Deduplicate and filter out empty field names
         let unique_fields: BTreeSet<_> = fields.into_iter().filter(|f| !f.is_empty()).collect();
-        self.event_fields = unique_fields.into_iter().collect();
+        self.excluded_fields = unique_fields;
         self
     }
 
@@ -559,7 +567,7 @@ impl TracingRateLimitLayerBuilder {
         Ok(TracingRateLimitLayer {
             limiter,
             span_context_fields: Arc::new(self.span_context_fields),
-            event_fields: Arc::new(self.event_fields),
+            excluded_fields: Arc::new(self.excluded_fields),
             exempt_targets: Arc::new(self.exempt_targets),
             #[cfg(feature = "async")]
             emitter_handle,
@@ -583,7 +591,7 @@ where
 {
     limiter: RateLimiter<S>,
     span_context_fields: Arc<Vec<String>>,
-    event_fields: Arc<Vec<String>>,
+    excluded_fields: Arc<BTreeSet<String>>,
     exempt_targets: Arc<BTreeSet<String>>,
     #[cfg(feature = "async")]
     emitter_handle: Arc<Mutex<Option<EmitterHandle>>>,
@@ -630,24 +638,25 @@ where
     }
 
     /// Extract event fields from an event.
+    ///
+    /// Extracts ALL fields from the event, then excludes any fields in the
+    /// excluded_fields set. This ensures that field values are included in
+    /// event signatures by default, preventing accidental deduplication of
+    /// semantically different events.
     fn extract_event_fields(&self, event: &tracing::Event<'_>) -> BTreeMap<String, String> {
-        if self.event_fields.is_empty() {
-            return BTreeMap::new();
-        }
-
         let mut visitor = FieldVisitor::new();
         event.record(&mut visitor);
         let all_fields = visitor.into_fields();
 
-        // Filter to only the configured event fields
-        self.event_fields
-            .iter()
-            .filter_map(|field_name| {
-                all_fields
-                    .get(field_name)
-                    .map(|value| (field_name.clone(), value.clone()))
-            })
-            .collect()
+        // Exclude configured fields (e.g., high-cardinality fields like request_id)
+        if self.excluded_fields.is_empty() {
+            all_fields
+        } else {
+            all_fields
+                .into_iter()
+                .filter(|(field_name, _)| !self.excluded_fields.contains(field_name))
+                .collect()
+        }
     }
 
     /// Compute event signature from tracing metadata, span context, and event fields.
@@ -785,7 +794,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
             #[cfg(feature = "async")]
             summary_formatter: None,
             span_context_fields: Vec::new(),
-            event_fields: Vec::new(),
+            excluded_fields: BTreeSet::new(),
             eviction_strategy: None,
             exempt_targets: BTreeSet::new(),
         }
@@ -854,7 +863,7 @@ impl TracingRateLimitLayer<Arc<ShardedStorage<EventSignature, EventState>>> {
         TracingRateLimitLayer {
             limiter,
             span_context_fields: Arc::new(Vec::new()),
-            event_fields: Arc::new(Vec::new()),
+            excluded_fields: Arc::new(BTreeSet::new()),
             exempt_targets: Arc::new(BTreeSet::new()),
             #[cfg(feature = "async")]
             emitter_handle: Arc::new(Mutex::new(None)),
@@ -993,22 +1002,22 @@ mod tests {
     }
 
     #[test]
-    fn test_event_fields_deduplication() {
+    fn test_excluded_fields_deduplication() {
         let layer = TracingRateLimitLayer::builder()
-            .with_event_fields(vec![
-                "error_code".to_string(),
-                "error_code".to_string(), // duplicate
-                "status".to_string(),
+            .with_excluded_fields(vec![
+                "request_id".to_string(),
+                "request_id".to_string(), // duplicate
+                "trace_id".to_string(),
                 "".to_string(),           // empty, should be filtered
-                "error_code".to_string(), // another duplicate
+                "request_id".to_string(), // another duplicate
             ])
             .build()
             .unwrap();
 
-        // Should only have 2 unique fields: error_code and status
-        assert_eq!(layer.event_fields.len(), 2);
-        assert!(layer.event_fields.iter().any(|f| f == "error_code"));
-        assert!(layer.event_fields.iter().any(|f| f == "status"));
+        // Should only have 2 unique fields: request_id and trace_id
+        assert_eq!(layer.excluded_fields.len(), 2);
+        assert!(layer.excluded_fields.contains("request_id"));
+        assert!(layer.excluded_fields.contains("trace_id"));
     }
 
     #[test]
@@ -1321,7 +1330,7 @@ mod tests {
         let layer = TracingRateLimitLayer {
             limiter,
             span_context_fields: Arc::new(Vec::new()),
-            event_fields: Arc::new(Vec::new()),
+            excluded_fields: Arc::new(BTreeSet::new()),
             exempt_targets: Arc::new(BTreeSet::new()),
             #[cfg(feature = "async")]
             emitter_handle: Arc::new(Mutex::new(None)),

@@ -9,9 +9,12 @@ use tracing_throttle::{Policy, TracingRateLimitLayer};
 
 fn main() {
     // Create a rate limit layer with a count-based policy
-    // Default: max 10,000 signatures with LRU eviction
+    // We exclude the 'iteration' field because it's just for tracking loop progress,
+    // not part of the log message's semantic meaning. This allows us to demonstrate
+    // throttling of truly repeated messages (same message content, different iteration).
     let rate_limit_layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(3).unwrap())
+        .with_excluded_fields(vec!["iteration".to_string()])
         .build()
         .unwrap();
 

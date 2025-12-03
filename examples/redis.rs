@@ -85,8 +85,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Simulate burst of identical logs (will be rate limited as a group)
     info!("=== Burst Test (identical logs) ===");
-    for i in 1..=100 {
-        info!(message = "Burst event", iteration = i);
+    for _ in 1..=100 {
+        info!(message = "Burst event", "Repeated event");
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -94,10 +94,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simulate different log levels (each limited independently)
     info!("");
     info!("=== Multi-Level Test (different signatures) ===");
-    for i in 1..=30 {
-        info!(event = "info", count = i, "Info level event");
-        warn!(event = "warn", count = i, "Warning level event");
-        error!(event = "error", count = i, "Error level event");
+    for _ in 1..=30 {
+        info!(event = "info", "Info level event");
+        warn!(event = "warn", "Warning level event");
+        error!(event = "error", "Error level event");
     }
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -119,8 +119,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Waiting 2 seconds for token refill (10 tokens at 5/sec)...");
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    for i in 1..=15 {
-        info!(iteration = i, "After refill");
+    for _ in 1..=15 {
+        info!("After refill");
     }
 
     tokio::time::sleep(Duration::from_secs(1)).await;

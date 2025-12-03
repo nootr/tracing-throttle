@@ -16,7 +16,7 @@ fn test_event_field_overrides_span_context() {
     let rate_limit = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(2).unwrap())
         .with_span_context_fields(vec!["user_id".to_string()])
-        .with_event_fields(vec!["user_id".to_string()])
+        // Event fields are included by default, no need to specify
         .build()
         .unwrap();
 
@@ -98,7 +98,6 @@ fn test_token_bucket_policy_with_span_fields() {
 fn test_token_bucket_policy_with_event_fields() {
     let rate_limit = TracingRateLimitLayer::builder()
         .with_policy(Policy::token_bucket(2.0, 100.0).unwrap())
-        .with_event_fields(vec!["error_code".to_string()])
         .build()
         .unwrap();
 
@@ -177,7 +176,6 @@ fn test_time_window_policy_with_span_fields() {
 fn test_exponential_backoff_with_event_fields() {
     let rate_limit = TracingRateLimitLayer::builder()
         .with_policy(Policy::exponential_backoff())
-        .with_event_fields(vec!["error_code".to_string()])
         .build()
         .unwrap();
 
@@ -318,7 +316,6 @@ fn test_different_field_value_types() {
     // Test that various field types (u64, i64, f64, bool, str) work correctly
     let rate_limit = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(2).unwrap())
-        .with_event_fields(vec!["value".to_string()])
         .build()
         .unwrap();
 
@@ -369,7 +366,6 @@ fn test_empty_string_field_values() {
     // Test that empty string values are treated as valid field values
     let rate_limit = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(2).unwrap())
-        .with_event_fields(vec!["category".to_string()])
         .build()
         .unwrap();
 
@@ -405,7 +401,6 @@ fn test_special_characters_in_field_values() {
     // Test that special characters in field values are handled correctly
     let rate_limit = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(2).unwrap())
-        .with_event_fields(vec!["path".to_string()])
         .build()
         .unwrap();
 

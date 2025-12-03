@@ -5,13 +5,18 @@
 //! - Time-window: Allow K events per time period
 //! - Count-based: Allow N events then suppress
 //! - Exponential backoff: Allow 1st, 2nd, 4th, 8th, etc.
+//!
+//! Note: All examples exclude the `iteration` field from signatures.
+//! This is because `iteration` is just tracking loop progress, not part of
+//! the event's semantic meaning. Excluding it allows us to demonstrate
+//! throttling behavior on truly repeated events.
 
 use std::time::Duration;
 use tracing::info;
 use tracing_subscriber::prelude::*;
 use tracing_throttle::{Policy, TracingRateLimitLayer};
 
-// Helper function to log events - ensures all events have the same signature (same source location)
+// Helper function to log events from the same source location
 fn log_event(iteration: i32) {
     info!(iteration = iteration, "Token bucket test message");
 }
@@ -22,6 +27,7 @@ fn demonstrate_token_bucket() {
 
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::token_bucket(5.0, 2.0).unwrap())
+        .with_excluded_fields(vec!["iteration".to_string()])
         .build()
         .unwrap();
 
@@ -64,6 +70,7 @@ fn demonstrate_count_based() {
 
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::count_based(5).unwrap())
+        .with_excluded_fields(vec!["iteration".to_string()])
         .build()
         .unwrap();
 
@@ -83,6 +90,7 @@ fn demonstrate_time_window() {
 
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::time_window(3, Duration::from_millis(100)).unwrap())
+        .with_excluded_fields(vec!["iteration".to_string()])
         .build()
         .unwrap();
 
@@ -114,6 +122,7 @@ fn demonstrate_exponential_backoff() {
 
     let layer = TracingRateLimitLayer::builder()
         .with_policy(Policy::exponential_backoff())
+        .with_excluded_fields(vec!["iteration".to_string()])
         .build()
         .unwrap();
 

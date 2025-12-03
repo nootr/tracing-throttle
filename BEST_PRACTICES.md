@@ -1,255 +1,415 @@
 # tracing-throttle Best Practices
 
-A practical guide for using `tracing-throttle` effectively in your applications.
+A practical guide for using `tracing-throttle` effectively in production.
 
 ## Understanding Event Signatures
 
-`tracing-throttle` deduplicates log events based on their **signature**, which by default consists of:
-- Log level (INFO, WARN, ERROR, etc.)
-- Target (module path)
-- Message text
+`tracing-throttle` deduplicates events based on their **signature**, which by default consists of:
 
-**Important**: Field values are NOT included in signatures by default.
+- **Event level** (INFO, WARN, ERROR, etc.)
+- **Target** (module path)
+- **Message text**
+- **ALL field values** (since v0.4.0)
 
-## Best Practice #1: Use Static Message Strings
-
-### ❌ Don't: Put Variable Data in Message Strings
+This means events with different field values are treated as **semantically different** and NOT deduplicated:
 
 ```rust
-// WRONG: Each message has a unique string, creating unique signatures
-for i in 0..100 {
-    info!("Processing request #{}", i);  // 100 different signatures!
-}
-
-// WRONG: Dynamic error messages
-error!("Failed to connect to {}", server_url);  // Every URL is unique
+error!(user_id = 123, "Failed to fetch user");  // Signature A
+error!(user_id = 456, "Failed to fetch user");  // Signature B - DIFFERENT!
 ```
 
-**Problem**: Every log creates a unique signature, so throttling never kicks in.
+Both errors are logged because they represent failures for different users. This prevents accidental loss of important context.
+
+## Best Practice #1: Keep Message Strings Static
+
+### ❌ Don't: Embed Variable Data in Messages
+
+```rust
+// WRONG: Each message creates a unique signature
+for user_id in 0..100 {
+    error!("Failed to fetch user {}", user_id);  // 100 different messages!
+}
+```
+
+**Problem**: Message text is part of the signature. Every variation creates a unique signature, preventing throttling.
 
 ### ✅ Do: Use Structured Fields for Variable Data
 
 ```rust
-// CORRECT: Message is constant, variable data in fields
-for i in 0..100 {
-    info!(request_num = i, "Processing request");  // 1 signature, throttled after limit
+// CORRECT: Static message, variable data in fields
+for user_id in 0..100 {
+    error!(user_id = user_id, "Failed to fetch user");
 }
-
-// CORRECT: Static message with structured fields
-error!(server = %server_url, "Failed to connect to server");
 ```
 
-**Result**: All logs share the same signature and get throttled as a group.
+**Result**: All errors share the same message but have different `user_id` values, so each user's errors are tracked independently.
 
-## Best Practice #2: Choose the Right Throttling Policy
+## Best Practice #2: Understand Field-Based Throttling
 
-### Token Bucket (Recommended Default)
-
-Best for: General-purpose rate limiting with burst tolerance.
+Since all field values are included in signatures by default, identical field values are throttled together:
 
 ```rust
-// Allow 10 events/second with burst capacity of 5
-let policy = Policy::token_bucket(10.0, 5.0).unwrap();
+// Same user_id, same message = same signature
+for _ in 0..1000 {
+    error!(user_id = 123, "Failed to fetch user");
+}
+// With default policy: First 50 logged immediately, then 1/sec
 ```
 
-**Use when**: You want to allow occasional bursts but maintain an average rate.
-
-### Time-Window
-
-Best for: Strict limits per time period.
+This is **per-entity throttling** by default:
 
 ```rust
-// Allow exactly 5 events per 1-second window
-let policy = Policy::time_window(5, Duration::from_secs(1)).unwrap();
+// Different user_id values = different signatures = independent throttling
+error!(user_id = 123, "Failed to fetch user");  // User 123's quota
+error!(user_id = 456, "Failed to fetch user");  // User 456's quota (separate)
 ```
 
-**Use when**: You need predictable limits (e.g., "no more than X logs per minute").
-
-### Count-Based
-
-Best for: Limiting total occurrences.
-
-```rust
-// Allow only 3 occurrences, then suppress all remaining
-let policy = Policy::count_based(3).unwrap();
-```
-
-**Use when**: You want to see a few examples then suppress (e.g., startup warnings).
-
-### Exponential Backoff
-
-Best for: Progressively reducing log frequency.
-
-```rust
-// Emit at: 1st, 2nd, 4th, 8th, 16th, 32nd...
-let policy = Policy::exponential_backoff();
-```
-
-**Use when**: You want to see that an issue is ongoing without flooding logs.
-
-## Best Practice #3: Per-Entity Throttling
-
-Sometimes you want to throttle per-user, per-endpoint, or per-resource instead of globally.
-
-### When to Use
-
-```rust
-// Throttle per user - each user_id gets independent rate limits
-let layer = TracingRateLimitLayer::builder()
-    .with_event_fields(vec!["user_id".to_string()])
-    .with_policy(Policy::time_window(10, Duration::from_secs(1)).unwrap())
-    .build()
-    .unwrap();
-
-info!(user_id = 123, "API request");  // User 123's quota
-info!(user_id = 456, "API request");  // User 456's separate quota
-```
-
-### Common Use Cases
+### Common Per-Entity Patterns
 
 ```rust
 // Per-endpoint rate limiting
-.with_event_fields(vec!["endpoint".to_string()])
 warn!(endpoint = "/api/users", "High latency detected");
+warn!(endpoint = "/api/orders", "High latency detected");  // Independent limit
 
-// Per-service rate limiting in microservices
-.with_event_fields(vec!["service".to_string()])
+// Per-service monitoring in microservices
 error!(service = "auth-service", "Connection timeout");
+error!(service = "payment-service", "Connection timeout");  // Separate tracking
 
-// Per-resource monitoring
-.with_event_fields(vec!["resource_id".to_string()])
-warn!(resource_id = "db-primary", "Connection pool exhausted");
+// Per-error-code throttling
+error!(error_code = "AUTH_FAILED", "Authentication error");
+error!(error_code = "TIMEOUT", "Authentication error");  // Different signatures
 ```
 
-### Warning: High Cardinality
+## Best Practice #3: Exclude High-Cardinality Fields
 
-Be careful with high-cardinality fields (request IDs, timestamps, UUIDs):
+**Problem**: Some fields create too many unique signatures, defeating throttling:
 
 ```rust
-// ❌ DON'T: Creates a unique signature for every request
-.with_event_fields(vec!["request_id".to_string()])
-info!(request_id = uuid, "Request processed");  // No throttling!
-
-// ✅ DO: Use low-cardinality fields
-.with_event_fields(vec!["user_id".to_string()])
-info!(user_id = 123, request_id = uuid, "Request processed");
+// ❌ DON'T: request_id creates unique signature for every request
+for i in 0..1000 {
+    error!(request_id = uuid::Uuid::new_v4().to_string(), "Database timeout");
+}
+// Result: All 1000 errors logged (each has unique request_id)
 ```
 
-## Best Practice #4: Memory Management
+**Solution**: Exclude high-cardinality fields from signatures:
+
+```rust
+// ✅ DO: Exclude request_id so errors are throttled together
+let layer = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
+    .with_policy(Policy::token_bucket(50.0, 1.0).unwrap())
+    .build()
+    .unwrap();
+
+for i in 0..1000 {
+    error!(request_id = uuid::Uuid::new_v4().to_string(), "Database timeout");
+}
+// Result: First 50 logged, then 1/sec (all share same signature now)
+```
+
+### Common High-Cardinality Fields to Exclude
+
+```rust
+let layer = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec![
+        "request_id".to_string(),
+        "trace_id".to_string(),
+        "span_id".to_string(),
+        "correlation_id".to_string(),
+        "timestamp".to_string(),
+        "latency_ms".to_string(),
+        "duration".to_string(),
+    ])
+    .build()
+    .unwrap();
+```
+
+**Rule of Thumb**: If a field has more than ~100 unique values in production, consider excluding it.
+
+## Best Practice #4: Choose the Right Rate Limiting Policy
+
+### Token Bucket (Default) - Recommended for Most Cases
+
+```rust
+// Allow bursts of 50 events, then refill at 1 event/sec (60/min)
+Policy::token_bucket(50.0, 1.0).unwrap()
+```
+
+**Use when**: You want to tolerate occasional bursts but maintain an average rate.
+
+**Example**: Database connection errors - allow initial burst to see the issue, then limit ongoing noise.
+
+### Time-Window - Strict Periodic Limits
+
+```rust
+// Allow exactly 10 events per 60-second window
+Policy::time_window(10, Duration::from_secs(60)).unwrap()
+```
+
+**Use when**: You need predictable limits for dashboards/alerts.
+
+**Example**: "No more than 100 authentication failures per minute" for security monitoring.
+
+### Count-Based - Limit Total Occurrences
+
+```rust
+// Allow only 5 events total, then suppress all remaining
+Policy::count_based(5).unwrap()
+```
+
+**Use when**: You want to see a few examples then stop.
+
+**Example**: Deprecation warnings at startup - see a few, then suppress the rest.
+
+### Exponential Backoff - Progressive Reduction
+
+```rust
+// Emit at: 1st, 2nd, 4th, 8th, 16th, 32nd, 64th...
+Policy::exponential_backoff()
+```
+
+**Use when**: You want to know an issue is ongoing without flooding logs.
+
+**Example**: Retry logic failures - see the pattern without overwhelming output.
+
+## Best Practice #5: Combine Span Context for Richer Signatures
+
+Use span context fields for ambient context that should affect throttling:
+
+```rust
+let layer = TracingRateLimitLayer::builder()
+    .with_span_context_fields(vec!["user_id".to_string()])
+    .with_excluded_fields(vec!["request_id".to_string()])
+    .build()
+    .unwrap();
+
+let span = info_span!("request", user_id = "alice");
+let _enter = span.enter();
+
+// All these errors share: (user_id="alice", error_code="TIMEOUT")
+for _ in 0..100 {
+    error!(error_code = "TIMEOUT", "Service unavailable");  // Throttled together
+}
+
+// Different user = different signature
+let span2 = info_span!("request", user_id = "bob");
+let _enter2 = span2.enter();
+
+for _ in 0..100 {
+    error!(error_code = "TIMEOUT", "Service unavailable");  // Independent quota
+}
+```
+
+**Use case**: Multi-tenant applications where you want per-tenant rate limiting.
+
+## Best Practice #6: Memory Management for High-Cardinality Scenarios
 
 ### Default Settings
 
-- Tracks up to 10,000 unique signatures
+- Tracks up to **10,000 unique signatures**
 - ~200-400 bytes per signature
 - ~2-4 MB typical memory usage
 
-### Adjust Based on Your Scale
+### Adjust Based on Cardinality
 
 ```rust
-// Small application with few unique log signatures
+// Low cardinality (few unique log patterns)
 let layer = TracingRateLimitLayer::builder()
     .with_max_signatures(1_000)
     .build()
     .unwrap();
 
-// Large application with many unique log patterns
+// Medium cardinality (per-user throttling, 10k users)
 let layer = TracingRateLimitLayer::builder()
     .with_max_signatures(50_000)
+    .with_eviction_strategy(EvictionStrategy::lru())
     .build()
     .unwrap();
 
-// High-cardinality (per-user throttling with millions of users)
+// High cardinality (per-user per-endpoint, 100k combinations)
 let layer = TracingRateLimitLayer::builder()
     .with_max_signatures(100_000)
-    .with_eviction_strategy(EvictionStrategy::lru())
+    .with_eviction_strategy(EvictionStrategy::combined(
+        EvictionStrategy::priority(),
+        EvictionStrategy::memory_based(50 * 1024 * 1024), // 50 MB limit
+    ))
     .build()
     .unwrap();
 ```
 
-## Best Practice #5: Monitor Your Throttling
+### Memory Estimation
 
-Always monitor metrics to ensure throttling is working as expected.
+Formula: `max_signatures * 300 bytes ≈ memory usage`
+
+Examples:
+- 10,000 signatures ≈ 3 MB
+- 50,000 signatures ≈ 15 MB
+- 100,000 signatures ≈ 30 MB
+
+## Best Practice #7: Monitor and Observe Throttling Behavior
 
 ```rust
 let layer = TracingRateLimitLayer::builder()
-    .with_policy(Policy::time_window(100, Duration::from_secs(1)).unwrap())
+    .with_active_emission(true)  // Emit suppression summaries
     .with_summary_interval(Duration::from_secs(60))
     .build()
     .unwrap();
 
 let metrics = layer.metrics().clone();
 
-// In a monitoring task
+// Periodic metrics reporting
 tokio::spawn(async move {
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
 
-        let allowed = metrics.events_allowed();
-        let suppressed = metrics.events_suppressed();
-        let total = allowed + suppressed;
-
-        if total > 0 {
-            let suppression_rate = (suppressed as f64 / total as f64) * 100.0;
-            info!(
-                events_allowed = allowed,
-                events_suppressed = suppressed,
-                suppression_rate = format!("{:.1}%", suppression_rate),
-                "Throttling metrics"
-            );
-        }
+        let snapshot = metrics.snapshot();
+        info!(
+            events_allowed = snapshot.events_allowed,
+            events_suppressed = snapshot.events_suppressed,
+            suppression_rate = format!("{:.1}%", snapshot.suppression_rate() * 100.0),
+            active_signatures = snapshot.active_signatures,
+            "Rate limiting metrics"
+        );
     }
 });
 ```
 
-## Testing Your Throttling Configuration
+## Common Anti-Patterns to Avoid
+
+### ❌ Anti-Pattern 1: Treating Different Events as Same
+
+```rust
+// WRONG: Deduplicating semantically different errors
+let layer = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec!["user_id".to_string()])  // DON'T!
+    .build()
+    .unwrap();
+
+error!(user_id = 123, "Payment failed");
+error!(user_id = 456, "Payment failed");
+// Both suppressed together - you lose visibility into which users are affected!
+```
+
+**Fix**: Only exclude truly high-cardinality fields like request_id, not semantic identifiers like user_id.
+
+### ❌ Anti-Pattern 2: Too Many Excluded Fields
+
+```rust
+// WRONG: Excluding too many fields loses context
+let layer = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec![
+        "user_id".to_string(),
+        "error_code".to_string(),
+        "endpoint".to_string(),
+        // ... too many!
+    ])
+    .build()
+    .unwrap();
+```
+
+**Fix**: Only exclude fields with cardinality > 100. Keep semantic fields.
+
+### ❌ Anti-Pattern 3: Using Dynamic Messages
+
+```rust
+// WRONG: Dynamic messages prevent signature matching
+error!("Failed after {} retries for user {}", retry_count, user_id);
+```
+
+**Fix**: Use static messages with structured fields:
+
+```rust
+error!(retry_count = retry_count, user_id = user_id, "Retry limit exceeded");
+```
+
+## Testing Your Configuration
 
 ```rust
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tracing_throttle::*;
 
     #[test]
-    fn test_throttling_behavior() {
+    fn test_per_user_throttling() {
         let layer = TracingRateLimitLayer::builder()
-            .with_policy(Policy::count_based(5).unwrap())
+            .with_policy(Policy::count_based(2).unwrap())
+            .with_excluded_fields(vec!["request_id".to_string()])
             .build()
             .unwrap();
 
         let metrics = layer.metrics().clone();
 
-        let subscriber = tracing_subscriber::registry()
-            .with(layer);
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry().with(layer),
+            || {
+                // User 123: should allow 2
+                for _ in 0..5 {
+                    tracing::error!(
+                        user_id = 123,
+                        request_id = "req-1",
+                        "Failed"
+                    );
+                }
 
-        tracing::subscriber::with_default(subscriber, || {
-            // Generate 20 identical log messages
-            for _ in 0..20 {
-                info!("Test message");
-            }
-        });
+                // User 456: should also allow 2 (independent quota)
+                for _ in 0..5 {
+                    tracing::error!(
+                        user_id = 456,
+                        request_id = "req-2",
+                        "Failed"
+                    );
+                }
+            },
+        );
 
-        // Verify only 5 were allowed, 15 suppressed
-        assert_eq!(metrics.events_allowed(), 5);
-        assert_eq!(metrics.events_suppressed(), 15);
+        // Should allow 4 total: 2 for user 123 + 2 for user 456
+        assert_eq!(metrics.events_allowed(), 4);
+        assert_eq!(metrics.events_suppressed(), 6);
     }
 }
 ```
 
-## Key Takeaways
-
-1. **Keep message strings static** - put variable data in structured fields
-2. **Choose the right policy** for your use case (token bucket is a good default)
-3. **Use `.with_event_fields()`** for per-entity throttling (users, endpoints, services)
-4. **Avoid high-cardinality fields** in signatures (UUIDs, timestamps, request IDs)
-5. **Monitor metrics** to verify throttling is working correctly
-6. **Adjust `max_signatures`** based on your application's log diversity
-7. **Test your configuration** to ensure expected throttling behavior
-
 ## When NOT to Use tracing-throttle
 
-- **Low-volume applications**: If you log < 100 events/second, throttling overhead may not be worth it
-- **Already deduplicated**: If your log aggregation system deduplicates, you might be duplicating effort
-- **Critical debug sessions**: Disable temporarily when debugging specific issues
-- **Log everything requirements**: Some compliance scenarios require complete log retention
+- **Low-volume applications**: < 100 events/sec may not need throttling
+- **Critical debugging**: Disable temporarily when investigating specific issues
+- **Compliance requirements**: Some scenarios require complete log retention
+- **Already deduplicated**: If your log aggregation system handles it
+
+## Migration from v0.3.x to v0.4.0
+
+### Breaking Change: Field Inclusion
+
+**v0.3.x (old)**:
+```rust
+// Fields excluded by default, opt-in with with_event_fields()
+let layer = TracingRateLimitLayer::builder()
+    .with_event_fields(vec!["user_id".to_string()])  // REMOVED in v0.4
+    .build()
+    .unwrap();
+```
+
+**v0.4.0 (new)**:
+```rust
+// All fields included by default, opt-out with with_excluded_fields()
+let layer = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec!["request_id".to_string(), "trace_id".to_string()])
+    .build()
+    .unwrap();
+```
+
+**Why this change**: Including all fields by default prevents accidental deduplication of semantically different events. Events with different field values are now correctly treated as distinct.
+
+## Key Takeaways
+
+1. **All field values are included in signatures by default** - different values = different signatures
+2. **Keep message strings static** - use structured fields for variable data
+3. **Exclude high-cardinality fields** (request_id, trace_id) to prevent signature explosion
+4. **Low-cardinality fields define semantics** - keep user_id, error_code, endpoint in signatures
+5. **Choose the right policy** - token bucket is a good default for most cases
+6. **Monitor metrics** to verify throttling works as expected
+7. **Test your configuration** to ensure expected behavior
 
 ## Further Reading
 

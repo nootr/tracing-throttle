@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.4.0] - 2025-12-03
 
+### Thanks
+
+- [@LifeMoroz](https://github.com/LifeMoroz) for reporting the field inclusion confusion in [#1](https://github.com/nootr/tracing-throttle/issues/1).
+
 ### BREAKING CHANGES
 
 **Field Inclusion Logic Inverted**

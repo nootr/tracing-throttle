@@ -16,6 +16,7 @@
 - [Quick Start](#quick-start)
 - [Best Practices](#best-practices)
 - [Configuration](#configuration)
+  - [Field Inclusion & Exclusion](#field-inclusion--exclusion)
   - [Rate Limiting Policies](#rate-limiting-policies)
   - [Eviction Strategies](#eviction-strategies)
   - [Observability & Metrics](#observability--metrics)
@@ -113,6 +114,34 @@ For detailed guidance on using `tracing-throttle` effectively, including:
 See **[BEST_PRACTICES.md](BEST_PRACTICES.md)** for a comprehensive guide with examples.
 
 ## Configuration
+
+### Field Inclusion & Exclusion
+
+By default, all field values are included in event signatures. This means events with different field values are throttled independently:
+
+```rust
+// Each user_id creates a unique signature
+info!(user_id = 123, "Login");  // Different signature
+info!(user_id = 456, "Login");  // Different signature
+```
+
+For high-cardinality fields (request IDs, trace IDs, timestamps), exclude them to prevent signature explosion:
+
+```rust
+let rate_limit = TracingRateLimitLayer::builder()
+    .with_excluded_fields(vec![
+        "request_id".to_string(),
+        "trace_id".to_string(),
+    ])
+    .build()
+    .unwrap();
+
+// Now these share the same signature (request_id excluded)
+info!(user_id = 123, request_id = "req-1", "Login");  // Same signature
+info!(user_id = 123, request_id = "req-2", "Login");  // Same signature
+```
+
+See [BEST_PRACTICES.md](BEST_PRACTICES.md) for detailed guidance on signature cardinality and memory management.
 
 ### Rate Limiting Policies
 

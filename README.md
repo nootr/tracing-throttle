@@ -25,7 +25,7 @@
 - [Performance](#performance)
   - [Performance Optimization](#performance-optimization)
 - [Examples](#examples)
-- [Roadmap](#roadmap)
+- [Roadmap to v1.0](#roadmap-to-v10)
 - [Development](#development)
   - [Setting Up Git Hooks](#setting-up-git-hooks)
 - [Contributing](#contributing)
@@ -253,60 +253,11 @@ cargo run --example policies
 cargo run --example summaries --features async
 ```
 
-## Roadmap
+## Roadmap to v1.0
 
-### v0.1.0 (MVP)
-✅ **Completed:**
-- Domain policies (count-based, time-window, exponential backoff)
-- Basic registry and rate limiter
-- `tracing::Layer` implementation
-- LRU eviction with configurable memory limits
-- Maximum signature limit with LRU eviction
-- Input validation (non-zero limits, durations, reasonable max_events)
-- Observability metrics (events allowed/suppressed, eviction tracking, signature count)
-- Circuit breaker for fail-safe operation
-- Memory usage documentation
-- Comprehensive integration tests
-- Mock infrastructure with test-helpers feature
-- Extensive test coverage (unit, integration, and doc tests)
-- Performance benchmarks (20M ops/sec)
-- Hexagonal architecture (clean ports & adapters)
-- CI/CD workflows (test, lint, publish)
+Before v1.0, the focus is on gathering real-world usage feedback to identify missing features and API improvements. Once v1.0 is released, the crate will enter maintenance mode with minimal feature additions (only when truly necessary) and focus on bug fixes to maintain stability.
 
-### v0.1.1 (Production Hardening)
-✅ **Completed:**
-- Graceful shutdown for async emitter with `EmitterHandle`
-- Comprehensive shutdown testing (12 dedicated shutdown tests)
-- Explicit shutdown requirement (no Drop implementation to prevent race conditions)
-- Final emission support on shutdown
-- Panic safety for emit functions with proper resource cleanup
-- Structured error handling with `ShutdownError` enum
-- Shutdown timeout support (default 10s, customizable)
-- Improved error handling and diagnostics
-- Biased shutdown signal prioritization for fast shutdown
-- Cancellation safety documentation
-
-### v0.2.0 (Enhanced Observability)
-✅ **Completed:**
-- Active suppression summary emission (automatic WARN-level emission of suppression statistics)
-- Configurable summary formatting (custom formatters for log level, fields, and message format)
-- Metrics integration examples (Prometheus/OpenTelemetry integration patterns documented)
-
-### v0.3.0 (Advanced Features)
-✅ **Completed:**
-- Pluggable storage backends (Redis backend with distributed rate limiting)
-- Rate limit by span context (per-user, per-tenant, per-request)
-- Advanced eviction policies (LRU, priority-based, memory-based, combined)
-
-### v1.0.0 (Stability & Production Readiness)
-Focus on reliability, documentation, and production hardening:
-- Comprehensive integration guide and best practices
-- Performance tuning guide with real-world scenarios
-- Production deployment examples and patterns
-- Stability testing and edge case coverage
-- API stabilization and deprecation policy
-- Telemetry and observability cookbook
-- Performance regression testing in CI
+If you're using `tracing-throttle` in production, please share feedback via GitHub issues. Your input will shape the v1.0 API.
 
 ## Development
 

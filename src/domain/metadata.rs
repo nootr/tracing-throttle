@@ -3,12 +3,16 @@
 //! This module provides structures for storing event details alongside signatures,
 //! allowing summaries to show what event was suppressed (not just a hash).
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 /// Metadata about a log event for human-readable summaries.
 ///
 /// Stores the essential details needed to understand what event was suppressed
 /// without having to correlate the signature hash with the original log.
+///
+/// Uses `Cow<'static, str>` to reduce allocations when possible, particularly
+/// for field names which are often static in tracing macros.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventMetadata {
     /// Log level (e.g., "INFO", "WARN", "ERROR")
@@ -18,7 +22,7 @@ pub struct EventMetadata {
     /// Target module path
     pub target: String,
     /// Structured fields (key-value pairs)
-    pub fields: BTreeMap<String, String>,
+    pub fields: BTreeMap<Cow<'static, str>, Cow<'static, str>>,
 }
 
 impl EventMetadata {
@@ -27,7 +31,7 @@ impl EventMetadata {
         level: String,
         message: String,
         target: String,
-        fields: BTreeMap<String, String>,
+        fields: BTreeMap<Cow<'static, str>, Cow<'static, str>>,
     ) -> Self {
         Self {
             level,
@@ -98,8 +102,8 @@ mod tests {
     #[test]
     fn test_format_detailed_with_fields() {
         let mut fields = BTreeMap::new();
-        fields.insert("error_code".to_string(), "TIMEOUT".to_string());
-        fields.insert("retry_count".to_string(), "3".to_string());
+        fields.insert(Cow::Borrowed("error_code"), Cow::Borrowed("TIMEOUT"));
+        fields.insert(Cow::Borrowed("retry_count"), Cow::Borrowed("3"));
 
         let metadata = EventMetadata::new(
             "ERROR".to_string(),

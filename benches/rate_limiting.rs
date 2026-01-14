@@ -1,4 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing_throttle::{
@@ -11,9 +12,9 @@ fn bench_signature_computation(c: &mut Criterion) {
     let mut group = c.benchmark_group("signature_computation");
 
     let fields = BTreeMap::from([
-        ("user".to_string(), "alice".to_string()),
-        ("action".to_string(), "login".to_string()),
-        ("ip".to_string(), "192.168.1.1".to_string()),
+        (Cow::Borrowed("user"), Cow::Borrowed("alice")),
+        (Cow::Borrowed("action"), Cow::Borrowed("login")),
+        (Cow::Borrowed("ip"), Cow::Borrowed("192.168.1.1")),
     ]);
 
     group.bench_function("simple_signature", |b| {
@@ -32,8 +33,13 @@ fn bench_signature_computation(c: &mut Criterion) {
     });
 
     group.bench_function("signature_with_many_fields", |b| {
-        let many_fields: BTreeMap<String, String> = (0..20)
-            .map(|i| (format!("field{}", i), format!("value{}", i)))
+        let many_fields: BTreeMap<Cow<'static, str>, Cow<'static, str>> = (0..20)
+            .map(|i| {
+                (
+                    Cow::Owned(format!("field{}", i)),
+                    Cow::Owned(format!("value{}", i)),
+                )
+            })
             .collect();
 
         b.iter(|| {
@@ -42,6 +48,52 @@ fn bench_signature_computation(c: &mut Criterion) {
                 black_box("Complex event"),
                 black_box(&many_fields),
                 Some(black_box("module::path")),
+            )
+        })
+    });
+
+    // Benchmark the benefit of Cow<'static, str> - zero-copy for static strings
+    group.bench_function("signature_borrowed_vs_owned", |b| {
+        // Using borrowed static strings (zero-copy)
+        let borrowed_fields = BTreeMap::from([
+            (Cow::Borrowed("user"), Cow::Borrowed("alice")),
+            (Cow::Borrowed("action"), Cow::Borrowed("login")),
+            (Cow::Borrowed("ip"), Cow::Borrowed("192.168.1.1")),
+        ]);
+
+        b.iter(|| {
+            EventSignature::new(
+                black_box("INFO"),
+                black_box("User logged in"),
+                black_box(&borrowed_fields),
+                Some(black_box("auth::handler")),
+            )
+        })
+    });
+
+    group.bench_function("signature_all_owned", |b| {
+        // Using all owned strings (allocations)
+        let owned_fields = BTreeMap::from([
+            (
+                Cow::Owned("user".to_string()),
+                Cow::Owned("alice".to_string()),
+            ),
+            (
+                Cow::Owned("action".to_string()),
+                Cow::Owned("login".to_string()),
+            ),
+            (
+                Cow::Owned("ip".to_string()),
+                Cow::Owned("192.168.1.1".to_string()),
+            ),
+        ]);
+
+        b.iter(|| {
+            EventSignature::new(
+                black_box("INFO"),
+                black_box("User logged in"),
+                black_box(&owned_fields),
+                Some(black_box("auth::handler")),
             )
         })
     });

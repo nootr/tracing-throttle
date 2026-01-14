@@ -16,6 +16,7 @@ use crate::infrastructure::clock::SystemClock;
 use crate::infrastructure::storage::ShardedStorage;
 use crate::infrastructure::visitor::FieldVisitor;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -604,7 +605,10 @@ where
     S: Storage<EventSignature, EventState> + Clone,
 {
     /// Extract span context fields from the current span.
-    fn extract_span_context<Sub>(&self, cx: &Context<'_, Sub>) -> BTreeMap<String, String>
+    fn extract_span_context<Sub>(
+        &self,
+        cx: &Context<'_, Sub>,
+    ) -> BTreeMap<Cow<'static, str>, Cow<'static, str>>
     where
         Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
@@ -618,11 +622,17 @@ where
             for span_ref in span.scope() {
                 let extensions = span_ref.extensions();
 
-                if let Some(stored_fields) = extensions.get::<BTreeMap<String, String>>() {
+                if let Some(stored_fields) =
+                    extensions.get::<BTreeMap<Cow<'static, str>, Cow<'static, str>>>()
+                {
                     for field_name in self.span_context_fields.as_ref() {
-                        if !context_fields.contains_key(field_name) {
-                            if let Some(value) = stored_fields.get(field_name) {
-                                context_fields.insert(field_name.clone(), value.clone());
+                        // Create an owned Cow since we can't guarantee 'static lifetime from the String
+                        let field_key: Cow<'static, str> = Cow::Owned(field_name.clone());
+                        if let std::collections::btree_map::Entry::Vacant(e) =
+                            context_fields.entry(field_key.clone())
+                        {
+                            if let Some(value) = stored_fields.get(&field_key) {
+                                e.insert(value.clone());
                             }
                         }
                     }
@@ -643,7 +653,10 @@ where
     /// excluded_fields set. This ensures that field values are included in
     /// event signatures by default, preventing accidental deduplication of
     /// semantically different events.
-    fn extract_event_fields(&self, event: &tracing::Event<'_>) -> BTreeMap<String, String> {
+    fn extract_event_fields(
+        &self,
+        event: &tracing::Event<'_>,
+    ) -> BTreeMap<Cow<'static, str>, Cow<'static, str>> {
         let mut visitor = FieldVisitor::new();
         event.record(&mut visitor);
         let all_fields = visitor.into_fields();
@@ -654,7 +667,7 @@ where
         } else {
             all_fields
                 .into_iter()
-                .filter(|(field_name, _)| !self.excluded_fields.contains(field_name))
+                .filter(|(field_name, _)| !self.excluded_fields.contains(field_name.as_ref()))
                 .collect()
         }
     }
@@ -670,7 +683,7 @@ where
     fn compute_signature(
         &self,
         metadata: &Metadata,
-        combined_fields: &BTreeMap<String, String>,
+        combined_fields: &BTreeMap<Cow<'static, str>, Cow<'static, str>>,
     ) -> EventSignature {
         let level = metadata.level().as_str();
         let message = metadata.name();
@@ -917,8 +930,8 @@ where
             event.record(&mut visitor);
             let all_fields = visitor.into_fields();
             let message = all_fields
-                .get("message")
-                .cloned()
+                .get(&Cow::Borrowed("message"))
+                .map(|v| v.to_string())
                 .unwrap_or_else(|| event.metadata().name().to_string());
 
             // Create EventMetadata for this event

@@ -34,6 +34,7 @@
 //!     .with(capture.with_filter(rate_limit_filter));  // Filters using those fields
 //! ```
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use tracing::field::{Field, Visit};
@@ -43,9 +44,12 @@ use tracing::field::{Field, Visit};
 /// This visitor collects field name-value pairs from tracing events and spans,
 /// storing them in a format suitable for signature computation. All values are
 /// converted to strings using `Debug` formatting.
+///
+/// Uses `Cow<'static, str>` for zero-copy field names when possible, reducing
+/// allocations during signature computation.
 #[derive(Debug)]
 pub(crate) struct FieldVisitor {
-    fields: BTreeMap<String, String>,
+    fields: BTreeMap<Cow<'static, str>, Cow<'static, str>>,
 }
 
 impl FieldVisitor {
@@ -57,13 +61,13 @@ impl FieldVisitor {
     }
 
     /// Consume the visitor and return the collected fields.
-    pub fn into_fields(self) -> BTreeMap<String, String> {
+    pub fn into_fields(self) -> BTreeMap<Cow<'static, str>, Cow<'static, str>> {
         self.fields
     }
 
     /// Get a reference to the collected fields.
     #[allow(dead_code)]
-    pub fn fields(&self) -> &BTreeMap<String, String> {
+    pub fn fields(&self) -> &BTreeMap<Cow<'static, str>, Cow<'static, str>> {
         &self.fields
     }
 }
@@ -71,37 +75,39 @@ impl FieldVisitor {
 impl Visit for FieldVisitor {
     fn record_f64(&mut self, field: &Field, value: f64) {
         self.fields
-            .insert(field.name().to_string(), value.to_string());
+            .insert(Cow::Borrowed(field.name()), Cow::Owned(value.to_string()));
     }
 
     fn record_i64(&mut self, field: &Field, value: i64) {
         self.fields
-            .insert(field.name().to_string(), value.to_string());
+            .insert(Cow::Borrowed(field.name()), Cow::Owned(value.to_string()));
     }
 
     fn record_u64(&mut self, field: &Field, value: u64) {
         self.fields
-            .insert(field.name().to_string(), value.to_string());
+            .insert(Cow::Borrowed(field.name()), Cow::Owned(value.to_string()));
     }
 
     fn record_bool(&mut self, field: &Field, value: bool) {
         self.fields
-            .insert(field.name().to_string(), value.to_string());
+            .insert(Cow::Borrowed(field.name()), Cow::Owned(value.to_string()));
     }
 
     fn record_str(&mut self, field: &Field, value: &str) {
         self.fields
-            .insert(field.name().to_string(), value.to_string());
+            .insert(Cow::Borrowed(field.name()), Cow::Owned(value.to_string()));
     }
 
     fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
         self.fields
-            .insert(field.name().to_string(), value.to_string());
+            .insert(Cow::Borrowed(field.name()), Cow::Owned(value.to_string()));
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        self.fields
-            .insert(field.name().to_string(), format!("{:?}", value));
+        self.fields.insert(
+            Cow::Borrowed(field.name()),
+            Cow::Owned(format!("{:?}", value)),
+        );
     }
 }
 

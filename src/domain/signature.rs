@@ -9,6 +9,7 @@
 //! Events with the same signature are considered "duplicates" for rate limiting purposes.
 
 use ahash::AHasher;
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -33,11 +34,12 @@ impl EventSignature {
     /// This function is designed for the hot path:
     /// - Uses fast ahash algorithm
     /// - O(1) complexity for signature creation after hashing
-    /// - No allocations
+    /// - Zero-copy field names when static strings are used
+    /// - Reduced allocations via Cow<'static, str>
     pub fn new(
         level: &str,
         message: &str,
-        fields: &BTreeMap<String, String>,
+        fields: &BTreeMap<Cow<'static, str>, Cow<'static, str>>,
         target: Option<&str>,
     ) -> Self {
         let mut hasher = AHasher::default();
@@ -106,13 +108,13 @@ mod tests {
     #[test]
     fn test_identical_events_produce_same_signature() {
         let fields1 = BTreeMap::from([
-            ("user".to_string(), "alice".to_string()),
-            ("action".to_string(), "login".to_string()),
+            (Cow::Borrowed("user"), Cow::Borrowed("alice")),
+            (Cow::Borrowed("action"), Cow::Borrowed("login")),
         ]);
 
         let fields2 = BTreeMap::from([
-            ("user".to_string(), "alice".to_string()),
-            ("action".to_string(), "login".to_string()),
+            (Cow::Borrowed("user"), Cow::Borrowed("alice")),
+            (Cow::Borrowed("action"), Cow::Borrowed("login")),
         ]);
 
         let sig1 = EventSignature::new("INFO", "User logged in", &fields1, Some("auth"));
@@ -143,9 +145,9 @@ mod tests {
 
     #[test]
     fn test_different_field_values_produce_different_signatures() {
-        let fields1 = BTreeMap::from([("user".to_string(), "alice".to_string())]);
+        let fields1 = BTreeMap::from([(Cow::Borrowed("user"), Cow::Borrowed("alice"))]);
 
-        let fields2 = BTreeMap::from([("user".to_string(), "bob".to_string())]);
+        let fields2 = BTreeMap::from([(Cow::Borrowed("user"), Cow::Borrowed("bob"))]);
 
         let sig1 = EventSignature::new("INFO", "Message", &fields1, None);
         let sig2 = EventSignature::new("INFO", "Message", &fields2, None);
@@ -157,12 +159,12 @@ mod tests {
     fn test_field_order_independence() {
         // BTreeMap ensures sorted order, but let's verify
         let mut fields1 = BTreeMap::new();
-        fields1.insert("z".to_string(), "1".to_string());
-        fields1.insert("a".to_string(), "2".to_string());
+        fields1.insert(Cow::Borrowed("z"), Cow::Borrowed("1"));
+        fields1.insert(Cow::Borrowed("a"), Cow::Borrowed("2"));
 
         let mut fields2 = BTreeMap::new();
-        fields2.insert("a".to_string(), "2".to_string());
-        fields2.insert("z".to_string(), "1".to_string());
+        fields2.insert(Cow::Borrowed("a"), Cow::Borrowed("2"));
+        fields2.insert(Cow::Borrowed("z"), Cow::Borrowed("1"));
 
         let sig1 = EventSignature::new("INFO", "Message", &fields1, None);
         let sig2 = EventSignature::new("INFO", "Message", &fields2, None);
@@ -211,7 +213,10 @@ mod tests {
     fn test_large_number_of_fields() {
         let mut fields = BTreeMap::new();
         for i in 0..100 {
-            fields.insert(format!("field{}", i), format!("value{}", i));
+            fields.insert(
+                Cow::Owned(format!("field{}", i)),
+                Cow::Owned(format!("value{}", i)),
+            );
         }
 
         let sig = EventSignature::new("INFO", "Message", &fields, None);
@@ -325,7 +330,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let mut fields = BTreeMap::new();
-        fields.insert("data".to_string(), "x".repeat(10_000));
+        fields.insert(Cow::Borrowed("data"), Cow::Owned("x".repeat(10_000)));
 
         let sig1 = EventSignature::new("INFO", "message", &fields, Some("target"));
         let sig2 = EventSignature::new("INFO", "message", &fields, Some("target"));
@@ -339,7 +344,10 @@ mod tests {
 
         let mut fields = BTreeMap::new();
         for i in 0..1000 {
-            fields.insert(format!("field_{}", i), format!("value_{}", i));
+            fields.insert(
+                Cow::Owned(format!("field_{}", i)),
+                Cow::Owned(format!("value_{}", i)),
+            );
         }
 
         let sig1 = EventSignature::new("INFO", "message", &fields, Some("target"));
@@ -353,7 +361,7 @@ mod tests {
         use std::collections::BTreeMap;
 
         let mut fields1 = BTreeMap::new();
-        fields1.insert("key".to_string(), "".to_string()); // Empty value
+        fields1.insert(Cow::Borrowed("key"), Cow::Borrowed("")); // Empty value
 
         let fields2 = BTreeMap::new(); // Missing key
 
@@ -369,14 +377,26 @@ mod tests {
 
         let mut fields1 = BTreeMap::new();
         for i in 0..100 {
-            fields1.insert(format!("z_field_{}", i), format!("value_{}", i));
-            fields1.insert(format!("a_field_{}", i), format!("value_{}", i));
+            fields1.insert(
+                Cow::Owned(format!("z_field_{}", i)),
+                Cow::Owned(format!("value_{}", i)),
+            );
+            fields1.insert(
+                Cow::Owned(format!("a_field_{}", i)),
+                Cow::Owned(format!("value_{}", i)),
+            );
         }
 
         let mut fields2 = BTreeMap::new();
         for i in 0..100 {
-            fields2.insert(format!("a_field_{}", i), format!("value_{}", i));
-            fields2.insert(format!("z_field_{}", i), format!("value_{}", i));
+            fields2.insert(
+                Cow::Owned(format!("a_field_{}", i)),
+                Cow::Owned(format!("value_{}", i)),
+            );
+            fields2.insert(
+                Cow::Owned(format!("z_field_{}", i)),
+                Cow::Owned(format!("value_{}", i)),
+            );
         }
 
         let sig1 = EventSignature::new("INFO", "msg", &fields1, Some("target"));

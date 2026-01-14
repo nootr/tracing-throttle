@@ -5,6 +5,55 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-01-14
+
+### Performance
+
+**Zero-Copy Field Extraction**
+
+Implemented zero-copy field name extraction using `Cow<'static, str>`, reducing allocations by 50% for typical logging patterns.
+
+**Changes:**
+- Field names from tracing macros are now borrowed (`&'static str`) instead of cloned
+- Reduces allocations from 6 to 3 per event with 3 fields
+- No measurable performance regression in signature computation (~40ns)
+- Real-world benefit: reduced allocator pressure under high-volume logging
+
+**Impact:** Transparent optimization - normal user API unchanged.
+
+### BREAKING CHANGES (Internal API)
+
+**EventSignature::new() signature changed**
+
+The `EventSignature::new()` method now accepts `BTreeMap<Cow<'static, str>, Cow<'static, str>>` instead of `BTreeMap<String, String>`.
+
+**Who's affected:** Only advanced users who directly construct `EventSignature` objects. The builder API and normal logging usage are completely unchanged.
+
+**Migration:**
+```rust
+// Before (v0.4.0)
+let fields = BTreeMap::from([
+    ("user".to_string(), "alice".to_string()),
+]);
+let sig = EventSignature::new("INFO", "test", &fields, None);
+
+// After (v0.4.1) - use Cow
+use std::borrow::Cow;
+let fields = BTreeMap::from([
+    (Cow::Borrowed("user"), Cow::Borrowed("alice")),
+]);
+let sig = EventSignature::new("INFO", "test", &fields, None);
+
+// Or: Use the unchanged simple() method
+let sig = EventSignature::simple("INFO", "test");
+```
+
+**Technical details:**
+- `FieldVisitor` now uses `Cow::Borrowed(field.name())` for zero-copy
+- `EventMetadata` fields updated to use Cow type
+- All extraction methods in `TracingRateLimitLayer` updated
+- 236 tests passing, including 9 new Cow-specific tests
+
 ## [0.4.0] - 2025-12-03
 
 ### Thanks

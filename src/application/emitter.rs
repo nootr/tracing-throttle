@@ -7,7 +7,10 @@ use crate::application::{
     ports::Storage,
     registry::{EventState, SuppressionRegistry},
 };
-use crate::domain::{signature::EventSignature, summary::SuppressionSummary};
+use crate::domain::{
+    signature::EventSignature,
+    summary::{ClaimedSuppressions, SuppressionSummary},
+};
 use std::time::Duration;
 
 #[cfg(feature = "async")]
@@ -267,6 +270,16 @@ where
     config: EmitterConfig,
 }
 
+struct ClaimedSummary {
+    signature: EventSignature,
+    claim: ClaimedSuppressions,
+}
+
+struct ClaimedSummaryBatch {
+    summaries: Vec<SuppressionSummary>,
+    claims: Vec<ClaimedSummary>,
+}
+
 impl<S> SummaryEmitter<S>
 where
     S: Storage<EventSignature, EventState> + Clone,
@@ -276,33 +289,81 @@ where
         Self { registry, config }
     }
 
-    /// Collect current suppression summaries.
+    /// Collect suppression summaries for newly reported suppressions.
     ///
-    /// Returns summaries for all events that have been suppressed at least
-    /// `min_count` times.
+    /// Returns summaries for events that have accumulated at least `min_count`
+    /// suppressions since their previous emission.
     pub fn collect_summaries(&self) -> Vec<SuppressionSummary> {
+        self.collect_claimed_summaries().summaries
+    }
+
+    fn collect_claimed_summaries(&self) -> ClaimedSummaryBatch {
         let mut summaries = Vec::new();
+        let mut claims = Vec::new();
         let min_count = self.config.min_count;
 
-        self.registry.for_each(|signature, state| {
-            let count = state.counter.count();
-
-            if count >= min_count {
+        self.registry.cleanup(|signature, state| {
+            if let Some(claim) = state.counter.claim_unreported(min_count) {
                 #[cfg(feature = "human-readable")]
-                let summary = SuppressionSummary::from_counter_with_metadata(
+                let summary = SuppressionSummary::from_claim_with_metadata(
                     *signature,
-                    &state.counter,
+                    claim.clone(),
                     state.metadata.clone(),
                 );
 
                 #[cfg(not(feature = "human-readable"))]
-                let summary = SuppressionSummary::from_counter(*signature, &state.counter);
+                let summary = SuppressionSummary::from_claim(*signature, claim.clone());
 
+                claims.push(ClaimedSummary {
+                    signature: *signature,
+                    claim,
+                });
                 summaries.push(summary);
             }
+
+            true
         });
 
-        summaries
+        ClaimedSummaryBatch { summaries, claims }
+    }
+
+    fn rollback_claimed_summaries(&self, claims: &[ClaimedSummary]) {
+        if claims.is_empty() {
+            return;
+        }
+
+        self.registry.cleanup(|signature, state| {
+            for claim in claims {
+                if claim.signature == *signature {
+                    state.counter.rollback_claim(&claim.claim);
+                }
+            }
+
+            true
+        });
+    }
+
+    fn emit_claimed_summaries<F>(&self, batch: ClaimedSummaryBatch, emit_fn: &mut F) -> bool
+    where
+        F: FnMut(Vec<SuppressionSummary>),
+    {
+        if batch.summaries.is_empty() {
+            return true;
+        }
+
+        let claims = batch.claims;
+        let summaries = batch.summaries;
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            emit_fn(summaries);
+        }));
+
+        if result.is_err() {
+            self.rollback_claimed_summaries(&claims);
+            false
+        } else {
+            true
+        }
     }
 
     /// Start emitting summaries periodically (async version).
@@ -320,9 +381,9 @@ where
     ///
     /// # Cancellation Safety
     ///
-    /// The spawned task is cancellation-safe:
-    /// - `collect_summaries()` reads atomically from storage without mutations
-    /// - If cancelled during emission, the next startup will see correct state
+    /// The spawned task is designed to shut down cleanly:
+    /// - `collect_summaries()` atomically claims unreported suppressions
+    /// - Claimed suppressions are not emitted again on later ticks
     /// - Panics in `emit_fn` are caught and don't abort the task
     /// - The `emit_fn` closure should be cancellation-safe (avoid holding locks across `.await`)
     ///
@@ -381,37 +442,21 @@ where
                         if *shutdown_rx.borrow_and_update() {
                             // Emit final summaries if requested
                             if emit_final {
-                                let summaries = self.collect_summaries();
-                                if !summaries.is_empty() {
-                                    // Panic safety for final emission too
-                                    // Note: summaries will be properly dropped even if emit_fn panics
-                                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                        emit_fn(summaries);
-                                    }));
-
-                                    if result.is_err() {
-                                        #[cfg(debug_assertions)]
-                                        eprintln!("Warning: emit_fn panicked during final emission");
-                                    }
+                                let batch = self.collect_claimed_summaries();
+                                if !self.emit_claimed_summaries(batch, &mut emit_fn) {
+                                    #[cfg(debug_assertions)]
+                                    eprintln!("Warning: emit_fn panicked during final emission");
                                 }
                             }
                             break;
                         }
                     }
                     _ = ticker.tick() => {
-                        let summaries = self.collect_summaries();
-                        if !summaries.is_empty() {
-                            // Panic safety: catch panics in emit_fn to prevent task abort
-                            // Note: summaries will be properly dropped even if emit_fn panics
-                            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                emit_fn(summaries);
-                            }));
-
-                            if result.is_err() {
-                                // emit_fn panicked - summaries were dropped, continue running
-                                #[cfg(debug_assertions)]
-                                eprintln!("Warning: emit_fn panicked during emission");
-                            }
+                        let batch = self.collect_claimed_summaries();
+                        if !self.emit_claimed_summaries(batch, &mut emit_fn) {
+                            // emit_fn panicked - claims were rolled back, continue running
+                            #[cfg(debug_assertions)]
+                            eprintln!("Warning: emit_fn panicked during emission");
                         }
                     }
                 }
@@ -450,7 +495,7 @@ mod tests {
         let policy = Policy::count_based(100).unwrap();
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let config = EmitterConfig::default();
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
 
         let summaries = emitter.collect_summaries();
         assert!(summaries.is_empty());
@@ -475,7 +520,7 @@ mod tests {
             });
         }
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
         let summaries = emitter.collect_summaries();
 
         assert_eq!(summaries.len(), 3);
@@ -485,6 +530,12 @@ mod tests {
         assert!(counts.contains(&5));
         assert!(counts.contains(&10));
         assert!(counts.contains(&15));
+
+        let summaries = emitter.collect_summaries();
+        assert!(
+            summaries.is_empty(),
+            "already emitted summaries should not be emitted again"
+        );
     }
 
     #[test]
@@ -511,12 +562,80 @@ mod tests {
             }
         });
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
         let summaries = emitter.collect_summaries();
 
         // Only the high-count event should be included
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].count, 14);
+
+        let summaries = emitter.collect_summaries();
+        assert!(
+            summaries.is_empty(),
+            "claimed summaries should not be emitted again"
+        );
+    }
+
+    #[test]
+    fn test_min_count_accumulates_unreported_suppressions() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::default().with_min_count(10);
+
+        let sig = EventSignature::simple("INFO", "Accumulated");
+        registry.with_event_state(sig, |state, now| {
+            for _ in 0..4 {
+                state.counter.record_suppression(now);
+            }
+        });
+
+        let emitter = SummaryEmitter::new(registry.clone(), config);
+        assert!(emitter.collect_summaries().is_empty());
+
+        registry.with_event_state(sig, |state, now| {
+            for _ in 0..6 {
+                state.counter.record_suppression(now);
+            }
+        });
+
+        let summaries = emitter.collect_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].count, 10);
+    }
+
+    #[test]
+    fn test_collect_summaries_reports_only_new_suppressions() {
+        let storage = Arc::new(ShardedStorage::new());
+        let clock = Arc::new(SystemClock::new());
+        let policy = Policy::count_based(100).unwrap();
+        let registry = SuppressionRegistry::new(storage, clock, policy);
+        let config = EmitterConfig::default();
+
+        let sig = EventSignature::simple("INFO", "Delta");
+        registry.with_event_state(sig, |state, now| {
+            for _ in 0..5 {
+                state.counter.record_suppression(now);
+            }
+        });
+
+        let emitter = SummaryEmitter::new(registry.clone(), config);
+        let summaries = emitter.collect_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].count, 5);
+
+        assert!(emitter.collect_summaries().is_empty());
+
+        registry.with_event_state(sig, |state, now| {
+            for _ in 0..3 {
+                state.counter.record_suppression(now);
+            }
+        });
+
+        let summaries = emitter.collect_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].count, 3);
     }
 
     #[cfg(feature = "async")]
@@ -536,7 +655,7 @@ mod tests {
             state.counter.record_suppression(now);
         });
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
 
         // Track emissions
         let emissions = Arc::new(Mutex::new(Vec::new()));
@@ -554,9 +673,9 @@ mod tests {
 
         handle.shutdown().await.expect("shutdown failed");
 
-        // Should have emitted at least once
+        // Should emit the suppression once, then stay quiet until new suppressions arrive.
         let emission_count = emissions.lock().unwrap().len();
-        assert!(emission_count >= 2);
+        assert_eq!(emission_count, 1);
     }
 
     #[test]
@@ -592,7 +711,7 @@ mod tests {
             state.counter.record_suppression(now);
         });
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
 
         let emissions = Arc::new(Mutex::new(0));
         let emissions_clone = Arc::clone(&emissions);
@@ -713,7 +832,7 @@ mod tests {
         let registry = SuppressionRegistry::new(storage, clock, policy);
         let config = EmitterConfig::new(Duration::from_millis(100)).unwrap();
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
         let handle = emitter.start(|_| {}, false);
 
         // Should be running
@@ -792,6 +911,7 @@ mod tests {
     #[tokio::test]
     async fn test_panic_in_emit_fn() {
         use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
 
         let storage = Arc::new(ShardedStorage::new());
         let clock = Arc::new(SystemClock::new());
@@ -807,13 +927,17 @@ mod tests {
             }
         });
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = Arc::clone(&call_count);
+        let emitted_counts = Arc::new(Mutex::new(Vec::new()));
+        let emitted_counts_clone = Arc::clone(&emitted_counts);
 
         let handle = emitter.start(
-            move |_summaries| {
+            move |summaries| {
+                let total: usize = summaries.iter().map(|summary| summary.count).sum();
+                emitted_counts_clone.lock().unwrap().push(total);
                 let count = call_count_clone.fetch_add(1, Ordering::SeqCst);
 
                 // Panic on first call, succeed on subsequent calls
@@ -825,8 +949,8 @@ mod tests {
             false,
         );
 
-        // Let it emit multiple times - first should panic, rest should succeed
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // The first emission panics and rolls back; the next tick retries the same batch.
+        tokio::time::sleep(Duration::from_millis(150)).await;
 
         handle.shutdown().await.expect("shutdown failed");
 
@@ -836,6 +960,14 @@ mod tests {
             final_count > 1,
             "Task should continue after panic in emit_fn"
         );
+
+        let emitted_counts = emitted_counts.lock().unwrap();
+        assert!(
+            emitted_counts.len() > 1,
+            "Panicked emission should be retried"
+        );
+        assert_eq!(emitted_counts[0], 5);
+        assert_eq!(emitted_counts[1], 5);
     }
 
     #[cfg(feature = "async")]
@@ -854,7 +986,7 @@ mod tests {
             state.counter.record_suppression(now);
         });
 
-        let emitter = SummaryEmitter::new(registry, config);
+        let emitter = SummaryEmitter::new(registry.clone(), config);
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let call_count_clone = Arc::clone(&call_count);
@@ -867,8 +999,15 @@ mod tests {
             false,
         );
 
-        // Let it run and panic multiple times
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_millis(70)).await;
+
+        for _ in 0..3 {
+            let sig = EventSignature::simple("INFO", "Test");
+            registry.with_event_state(sig, |state, now| {
+                state.counter.record_suppression(now);
+            });
+            tokio::time::sleep(Duration::from_millis(40)).await;
+        }
 
         handle.shutdown().await.expect("shutdown failed");
 

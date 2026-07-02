@@ -79,6 +79,36 @@ use tokio::sync::RwLock;
 struct SerializableEventState {
     policy: crate::domain::policy::Policy,
     suppressed_count: usize,
+    reported_count: usize,
+    first_suppressed_secs: u64,
+    first_suppressed_nanos: u32,
+    last_suppressed_secs: u64,
+    last_suppressed_nanos: u32,
+    last_reported_secs: u64,
+    last_reported_nanos: u32,
+    first_unreported_secs: u64,
+    first_unreported_nanos: u32,
+}
+
+/// Serialized form used before first-unreported progress was persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReportedSerializableEventState {
+    policy: crate::domain::policy::Policy,
+    suppressed_count: usize,
+    reported_count: usize,
+    first_suppressed_secs: u64,
+    first_suppressed_nanos: u32,
+    last_suppressed_secs: u64,
+    last_suppressed_nanos: u32,
+    last_reported_secs: u64,
+    last_reported_nanos: u32,
+}
+
+/// Legacy serialized form used before active-emission progress was persisted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LegacySerializableEventState {
+    policy: crate::domain::policy::Policy,
+    suppressed_count: usize,
     first_suppressed_secs: u64,
     first_suppressed_nanos: u32,
     last_suppressed_secs: u64,
@@ -93,18 +123,80 @@ impl SerializableEventState {
         // Convert Instant to Duration since base_instant for serialization
         let first_duration = counter.first_suppressed.duration_since(base_instant);
         let last_duration = counter.last_suppressed.duration_since(base_instant);
+        let last_reported_duration = counter.last_reported.duration_since(base_instant);
+        let first_unreported_duration = counter.first_unreported.duration_since(base_instant);
 
         Self {
             policy: state.policy.clone(),
             suppressed_count: counter.suppressed_count,
+            reported_count: counter.reported_count,
             first_suppressed_secs: first_duration.as_secs(),
             first_suppressed_nanos: first_duration.subsec_nanos(),
             last_suppressed_secs: last_duration.as_secs(),
             last_suppressed_nanos: last_duration.subsec_nanos(),
+            last_reported_secs: last_reported_duration.as_secs(),
+            last_reported_nanos: last_reported_duration.subsec_nanos(),
+            first_unreported_secs: first_unreported_duration.as_secs(),
+            first_unreported_nanos: first_unreported_duration.subsec_nanos(),
         }
     }
 
     /// Convert to runtime EventState.
+    fn to_event_state(&self, base_instant: Instant) -> EventState {
+        let first_suppressed =
+            base_instant + Duration::new(self.first_suppressed_secs, self.first_suppressed_nanos);
+        let last_suppressed =
+            base_instant + Duration::new(self.last_suppressed_secs, self.last_suppressed_nanos);
+        let last_reported =
+            base_instant + Duration::new(self.last_reported_secs, self.last_reported_nanos);
+        let first_unreported =
+            base_instant + Duration::new(self.first_unreported_secs, self.first_unreported_nanos);
+
+        EventState::from_snapshot_with_reported_and_first_unreported(
+            self.policy.clone(),
+            self.suppressed_count,
+            self.reported_count,
+            first_suppressed,
+            last_suppressed,
+            last_reported,
+            first_unreported,
+        )
+    }
+}
+
+fn serialize_event_state(
+    state: &EventState,
+    base_instant: Instant,
+) -> Result<Vec<u8>, Box<bincode::ErrorKind>> {
+    bincode::serialize(&SerializableEventState::from_event_state(
+        state,
+        base_instant,
+    ))
+}
+
+impl ReportedSerializableEventState {
+    /// Convert serialized state without a first-unreported cursor to runtime EventState.
+    fn to_event_state(&self, base_instant: Instant) -> EventState {
+        let first_suppressed =
+            base_instant + Duration::new(self.first_suppressed_secs, self.first_suppressed_nanos);
+        let last_suppressed =
+            base_instant + Duration::new(self.last_suppressed_secs, self.last_suppressed_nanos);
+        let last_reported =
+            base_instant + Duration::new(self.last_reported_secs, self.last_reported_nanos);
+
+        EventState::from_snapshot_with_reported(
+            self.policy.clone(),
+            self.suppressed_count,
+            self.reported_count,
+            first_suppressed,
+            last_suppressed,
+            last_reported,
+        )
+    }
+}
+
+impl LegacySerializableEventState {
+    /// Convert legacy serialized state to runtime EventState.
     fn to_event_state(&self, base_instant: Instant) -> EventState {
         let first_suppressed =
             base_instant + Duration::new(self.first_suppressed_secs, self.first_suppressed_nanos);
@@ -198,13 +290,30 @@ impl RedisStorage {
 
     /// Get a value from Redis, deserializing it.
     async fn get(&self, signature: &EventSignature) -> Result<Option<EventState>, RedisError> {
-        let key = self.key(signature);
         let mut conn = self.connection.write().await;
 
+        self.get_with_conn(signature, &mut conn).await
+    }
+
+    /// Get a value using an already-held Redis connection.
+    async fn get_with_conn(
+        &self,
+        signature: &EventSignature,
+        conn: &mut ConnectionManager,
+    ) -> Result<Option<EventState>, RedisError> {
+        let key = self.key(signature);
         let bytes: Option<Vec<u8>> = conn.get(&key).await?;
 
         if let Some(bytes) = bytes {
             if let Ok(serializable) = bincode::deserialize::<SerializableEventState>(&bytes) {
+                Ok(Some(serializable.to_event_state(self.base_instant)))
+            } else if let Ok(serializable) =
+                bincode::deserialize::<ReportedSerializableEventState>(&bytes)
+            {
+                Ok(Some(serializable.to_event_state(self.base_instant)))
+            } else if let Ok(serializable) =
+                bincode::deserialize::<LegacySerializableEventState>(&bytes)
+            {
                 Ok(Some(serializable.to_event_state(self.base_instant)))
             } else {
                 // Corrupted data, delete it
@@ -218,13 +327,21 @@ impl RedisStorage {
 
     /// Set a value in Redis, serializing it with TTL.
     async fn set(&self, signature: &EventSignature, state: &EventState) -> Result<(), RedisError> {
+        let mut conn = self.connection.write().await;
+
+        self.set_with_conn(signature, state, &mut conn).await
+    }
+
+    /// Set a value using an already-held Redis connection.
+    async fn set_with_conn(
+        &self,
+        signature: &EventSignature,
+        state: &EventState,
+        conn: &mut ConnectionManager,
+    ) -> Result<(), RedisError> {
         let key = self.key(signature);
-        let serializable = SerializableEventState::from_event_state(state, self.base_instant);
-
-        if let Ok(bytes) = bincode::serialize(&serializable) {
-            let mut conn = self.connection.write().await;
+        if let Ok(bytes) = serialize_event_state(state, self.base_instant) {
             let ttl_secs = self.config.ttl.as_secs();
-
             conn.set_ex::<_, _, ()>(&key, bytes, ttl_secs).await?;
         }
 
@@ -411,7 +528,8 @@ impl Storage<EventSignature, EventState> for RedisStorage {
                     if let Some(sig_str) = key.strip_prefix(&self.config.key_prefix) {
                         if let Ok(sig_hash) = sig_str.parse::<u64>() {
                             let signature = EventSignature::from_hash(sig_hash);
-                            if let Ok(Some(state)) = self.get(&signature).await {
+                            if let Ok(Some(state)) = self.get_with_conn(&signature, &mut conn).await
+                            {
                                 f(&signature, &state);
                             }
                         }
@@ -459,7 +577,12 @@ impl Storage<EventSignature, EventState> for RedisStorage {
                     if let Some(sig_str) = key.strip_prefix(&self.config.key_prefix) {
                         if let Ok(sig_hash) = sig_str.parse::<u64>() {
                             let signature = EventSignature::from_hash(sig_hash);
-                            if let Ok(Some(mut state)) = self.get(&signature).await {
+                            if let Ok(Some(mut state)) =
+                                self.get_with_conn(&signature, &mut conn).await
+                            {
+                                let original_bytes =
+                                    serialize_event_state(&state, self.base_instant).ok();
+
                                 if !f(&signature, &mut state) {
                                     // Delete key - predicate returned false
                                     if let Err(e) = conn.del::<_, ()>(&key).await {
@@ -469,9 +592,13 @@ impl Storage<EventSignature, EventState> for RedisStorage {
                                             "Failed to delete key from Redis during retain"
                                         );
                                     }
-                                } else {
-                                    // Update key - predicate returned true
-                                    if let Err(e) = self.set(&signature, &state).await {
+                                } else if original_bytes
+                                    != serialize_event_state(&state, self.base_instant).ok()
+                                {
+                                    // Update key only when predicate mutated state.
+                                    if let Err(e) =
+                                        self.set_with_conn(&signature, &state, &mut conn).await
+                                    {
                                         tracing::warn!(
                                             error = %e,
                                             signature = %signature.as_hash(),

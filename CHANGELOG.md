@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-07-02
+
+### Fixed
+
+- **Repeated suppression summaries**: Active summary emission now reports only newly suppressed events instead of re-emitting the same suppression counts on every interval.
+- **Redis summary state**: Redis-backed storage now persists reported-summary cursors so active emission does not repeat summaries after state reloads.
+- **Emission retry behavior**: Claimed summaries are rolled back if emission panics, allowing them to be retried instead of lost.
+- **Redis TTL preservation**: Active-emission scans no longer refresh Redis TTLs when retained state is unchanged.
+
 ## [0.4.2] - 2026-03-07
 
 ### Thanks

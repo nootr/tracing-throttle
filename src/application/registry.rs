@@ -68,12 +68,67 @@ impl EventState {
         first_suppressed: Instant,
         last_suppressed: Instant,
     ) -> Self {
+        Self::from_snapshot_with_reported(
+            policy,
+            suppressed_count,
+            0,
+            first_suppressed,
+            last_suppressed,
+            first_suppressed,
+        )
+    }
+
+    /// Create event state from a snapshot including reported suppressions.
+    ///
+    /// This is used by storage backends to persist active-emission progress.
+    #[cfg(feature = "redis-storage")]
+    pub fn from_snapshot_with_reported(
+        policy: Policy,
+        suppressed_count: usize,
+        reported_count: usize,
+        first_suppressed: Instant,
+        last_suppressed: Instant,
+        last_reported: Instant,
+    ) -> Self {
+        let first_unreported = if reported_count == 0 {
+            first_suppressed
+        } else {
+            last_reported
+        };
+
+        Self::from_snapshot_with_reported_and_first_unreported(
+            policy,
+            suppressed_count,
+            reported_count,
+            first_suppressed,
+            last_suppressed,
+            last_reported,
+            first_unreported,
+        )
+    }
+
+    /// Create event state from a snapshot including reported and unreported cursors.
+    ///
+    /// This is used by storage backends to persist active-emission progress.
+    #[cfg(feature = "redis-storage")]
+    pub fn from_snapshot_with_reported_and_first_unreported(
+        policy: Policy,
+        suppressed_count: usize,
+        reported_count: usize,
+        first_suppressed: Instant,
+        last_suppressed: Instant,
+        last_reported: Instant,
+        first_unreported: Instant,
+    ) -> Self {
         Self {
             policy,
-            counter: SuppressionCounter::from_snapshot(
+            counter: SuppressionCounter::from_snapshot_with_reported_and_first_unreported(
                 suppressed_count,
+                reported_count,
                 first_suppressed,
                 last_suppressed,
+                last_reported,
+                first_unreported,
             ),
             metadata: None,
         }

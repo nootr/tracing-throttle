@@ -157,7 +157,7 @@ async fn test_explicit_shutdown_in_application() {
     tokio::time::sleep(Duration::from_millis(250)).await;
 
     let emissions_before = app.emission_count();
-    assert!(emissions_before >= 2);
+    assert_eq!(emissions_before, 1);
 
     // Explicit shutdown
     app.shutdown().await;

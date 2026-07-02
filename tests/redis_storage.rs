@@ -5,8 +5,10 @@
 
 #![cfg(feature = "redis-storage")]
 
+use redis::AsyncCommands;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing_throttle::application::emitter::{EmitterConfig, SummaryEmitter};
 use tracing_throttle::application::ports::Storage;
 use tracing_throttle::application::registry::{EventState, SuppressionRegistry};
 use tracing_throttle::domain::signature::EventSignature;
@@ -15,7 +17,14 @@ use tracing_throttle::{Policy, RedisStorage, RedisStorageConfig};
 
 /// Check if Redis is available before running tests
 async fn redis_available() -> bool {
-    RedisStorage::connect("redis://127.0.0.1/").await.is_ok()
+    matches!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            RedisStorage::connect("redis://127.0.0.1/")
+        )
+        .await,
+        Ok(Ok(_))
+    )
 }
 
 /// Create a test storage with unique prefix
@@ -82,6 +91,98 @@ async fn test_redis_basic_set_get() {
         |state| {
             assert_eq!(state.counter.count(), 1);
         },
+    );
+
+    storage.clear();
+}
+
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn test_redis_persists_reported_suppressions() {
+    if !redis_available().await {
+        eprintln!("Skipping test: Redis not available");
+        return;
+    }
+
+    let storage = create_test_storage("reported_suppressions").await;
+    storage.clear();
+
+    let clock = Arc::new(SystemClock::new());
+    let policy = Policy::count_based(100).unwrap();
+    let registry = SuppressionRegistry::new(storage.clone(), clock, policy);
+    let sig = EventSignature::simple("INFO", "Redis reported test");
+
+    registry.with_event_state(sig, |state, now| {
+        for _ in 0..3 {
+            state.counter.record_suppression(now);
+        }
+    });
+
+    let emitter = SummaryEmitter::new(registry.clone(), EmitterConfig::default());
+    let summaries = emitter.collect_summaries();
+    assert_eq!(summaries.len(), 1);
+    assert_eq!(summaries[0].count, 3);
+
+    storage.with_entry_mut(
+        sig,
+        || panic!("Entry should exist"),
+        |state| {
+            assert_eq!(state.counter.count(), 3);
+            assert_eq!(state.counter.reported_count(), 3);
+            assert_eq!(state.counter.unreported_count(), 0);
+        },
+    );
+
+    let summaries = emitter.collect_summaries();
+    assert!(
+        summaries.is_empty(),
+        "reported suppressions should not be re-emitted after Redis round-trip"
+    );
+
+    storage.clear();
+}
+
+#[tokio::test]
+#[ignore] // Requires Redis
+async fn test_redis_retain_does_not_refresh_unchanged_ttl() {
+    if !redis_available().await {
+        eprintln!("Skipping test: Redis not available");
+        return;
+    }
+
+    let key_prefix = "test:retain_ttl:".to_string();
+    let storage = RedisStorage::connect_with_config(
+        "redis://127.0.0.1/",
+        RedisStorageConfig {
+            key_prefix: key_prefix.clone(),
+            ttl: Duration::from_secs(5),
+        },
+    )
+    .await
+    .expect("Failed to connect to Redis");
+    storage.clear();
+
+    let clock = Arc::new(SystemClock::new());
+    let policy = Policy::count_based(100).unwrap();
+    let registry = SuppressionRegistry::new(storage.clone(), clock, policy);
+    let sig = EventSignature::simple("INFO", "Redis TTL test");
+
+    registry.with_event_state(sig, |_state, _now| {});
+
+    let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+    let mut conn = redis::aio::ConnectionManager::new(client).await.unwrap();
+    let key = format!("{}{}", key_prefix, sig);
+
+    let ttl_before: i64 = conn.ttl(&key).await.unwrap();
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let emitter = SummaryEmitter::new(registry.clone(), EmitterConfig::default());
+    assert!(emitter.collect_summaries().is_empty());
+
+    let ttl_after: i64 = conn.ttl(&key).await.unwrap();
+    assert!(
+        ttl_after < ttl_before,
+        "unchanged retain should not refresh TTL: before={ttl_before}, after={ttl_after}"
     );
 
     storage.clear();

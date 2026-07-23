@@ -214,10 +214,7 @@ fn test_combined_span_context_and_event_fields() {
 
     let capture = MockCaptureLayer::new();
 
-    let rate_limit_filter = rate_limit.clone();
-    let subscriber = tracing_subscriber::registry()
-        .with(rate_limit)
-        .with(capture.clone().with_filter(rate_limit_filter));
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
 
     tracing::subscriber::with_default(subscriber, || {
         // Alice's AUTH_FAILED errors
@@ -267,10 +264,8 @@ fn test_excluded_fields_with_span_context() {
 
     let capture = MockCaptureLayer::new();
 
-    let rate_limit_filter = rate_limit.clone();
-    let subscriber = tracing_subscriber::registry()
-        .with(rate_limit)
-        .with(capture.clone().with_filter(rate_limit_filter));
+    let subscriber =
+        tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
 
     tracing::subscriber::with_default(subscriber, || {
         let span = tracing::info_span!("request", user_id = "alice");

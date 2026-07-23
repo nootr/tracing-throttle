@@ -58,6 +58,8 @@ pub enum BuildError {
     EmitterConfig(crate::application::emitter::EmitterConfigError),
 }
 
+struct CachedSpanFields(BTreeMap<Cow<'static, str>, Cow<'static, str>>);
+
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -631,16 +633,14 @@ where
             for span_ref in span.scope() {
                 let extensions = span_ref.extensions();
 
-                if let Some(stored_fields) =
-                    extensions.get::<BTreeMap<Cow<'static, str>, Cow<'static, str>>>()
-                {
+                if let Some(stored_fields) = extensions.get::<CachedSpanFields>() {
                     for field_name in self.span_context_fields.as_ref() {
                         // Create an owned Cow since we can't guarantee 'static lifetime from the String
                         let field_key: Cow<'static, str> = Cow::Owned(field_name.clone());
                         if let std::collections::btree_map::Entry::Vacant(e) =
                             context_fields.entry(field_key.clone())
                         {
-                            if let Some(value) = stored_fields.get(&field_key) {
+                            if let Some(value) = stored_fields.0.get(&field_key) {
                                 e.insert(value.clone());
                             }
                         }
@@ -654,6 +654,29 @@ where
         }
 
         context_fields
+    }
+
+    /// Handle entering a new span.
+    fn record_span_context<Sub>(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, Sub>,
+    ) where
+        Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        if self.span_context_fields.is_empty() {
+            return;
+        }
+
+        if let Some(span) = ctx.span(id) {
+            let mut visitor = FieldVisitor::new();
+            attrs.record(&mut visitor);
+            let fields = visitor.into_fields();
+
+            let mut extensions = span.extensions_mut();
+            extensions.replace(CachedSpanFields(fields));
+        }
     }
 
     /// Extract event fields from an event.
@@ -968,6 +991,15 @@ where
             self.should_allow(signature)
         }
     }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, Sub>,
+    ) {
+        self.record_span_context(attrs, id, ctx);
+    }
 }
 
 impl<S, Sub> Layer<Sub> for TracingRateLimitLayer<S>
@@ -981,18 +1013,7 @@ where
         id: &tracing::span::Id,
         ctx: Context<'_, Sub>,
     ) {
-        if self.span_context_fields.is_empty() {
-            return;
-        }
-
-        let mut visitor = FieldVisitor::new();
-        attrs.record(&mut visitor);
-        let fields = visitor.into_fields();
-
-        if let Some(span) = ctx.span(id) {
-            let mut extensions = span.extensions_mut();
-            extensions.insert(fields);
-        }
+        self.record_span_context(attrs, id, ctx);
     }
 }
 

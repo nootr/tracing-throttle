@@ -264,8 +264,7 @@ fn test_excluded_fields_with_span_context() {
 
     let capture = MockCaptureLayer::new();
 
-    let subscriber =
-        tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
 
     tracing::subscriber::with_default(subscriber, || {
         let span = tracing::info_span!("request", user_id = "alice");

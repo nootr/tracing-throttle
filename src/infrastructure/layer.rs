@@ -1013,6 +1013,8 @@ where
         id: &tracing::span::Id,
         ctx: Context<'_, Sub>,
     ) {
+        // Older versions of tracing-throttle asked you to add the TracingRateLimitLayer
+        // as both a filter and a layer, and we needed this.
         self.record_span_context(attrs, id, ctx);
     }
 }
@@ -1667,5 +1669,60 @@ mod tests {
         );
 
         layer_clone.shutdown().await.expect("shutdown failed");
+    }
+
+    #[cfg(all(feature = "async", feature = "human-readable"))]
+    #[tokio::test]
+    async fn test_filter_only_summary_includes_span_context_fields() {
+        use std::borrow::Cow;
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let summaries = Arc::new(Mutex::new(Vec::new()));
+
+        let layer = {
+            let summaries = summaries.clone();
+            TracingRateLimitLayer::builder()
+                .with_policy(Policy::count_based(1).unwrap())
+                .with_active_emission(true)
+                .with_summary_interval(Duration::from_millis(50))
+                .with_span_context_fields(vec!["stream_id".to_string()])
+                .with_summary_formatter(Arc::new(move |summary| {
+                    summaries.lock().unwrap().push(summary.clone());
+                }))
+                .build()
+                .unwrap()
+        };
+
+        let layer_clone = layer.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(layer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("stream", stream_id = "a");
+            let _enter = span.enter();
+
+            for _ in 0..4 {
+                tracing::info!("foo");
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        layer_clone.shutdown().await.expect("shutdown failed");
+
+        let summaries = summaries.lock().unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.metadata.is_some())
+            .expect("expected a summary with metadata");
+
+        let metadata = summary.metadata.as_ref().unwrap();
+        assert_eq!(
+            metadata
+                .fields
+                .get(&Cow::Borrowed("stream_id"))
+                .map(Cow::as_ref),
+            Some("a")
+        );
     }
 }

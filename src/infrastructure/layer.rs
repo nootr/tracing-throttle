@@ -1007,16 +1007,6 @@ where
     S: Storage<EventSignature, EventState> + Clone + 'static,
     Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::span::Id,
-        ctx: Context<'_, Sub>,
-    ) {
-        // Older versions of tracing-throttle asked you to add the TracingRateLimitLayer
-        // as both a filter and a layer, and we needed this.
-        self.record_span_context(attrs, id, ctx);
-    }
 }
 
 #[cfg(test)]

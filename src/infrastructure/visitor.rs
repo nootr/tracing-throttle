@@ -24,7 +24,7 @@
 //!     .unwrap();
 //!
 //! let subscriber = tracing_subscriber::registry()
-//!     .with(capture.with_filter(rate_limit_filter));
+//!     .with(capture.with_filter(rate_limit));
 //! ```
 
 use std::borrow::Cow;

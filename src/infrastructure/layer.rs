@@ -661,7 +661,7 @@ where
         context_fields
     }
 
-    /// Handle entering a new span.
+    /// Cache span attributes on span creation.
     fn record_span_context<Sub>(
         &self,
         attrs: &tracing::span::Attributes<'_>,
@@ -681,6 +681,39 @@ where
 
             let mut extensions = span.extensions_mut();
             extensions.replace(CachedSpanFields(fields));
+        }
+    }
+
+    /// Merge values recorded after span creation (`Span::record`) into the cache.
+    ///
+    /// Fields declared as `tracing::field::Empty` are not visited on creation,
+    /// so this is the only way values recorded later reach the span context.
+    fn update_span_context<Sub>(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, Sub>,
+    ) where
+        Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        if self.span_context_fields.is_empty() {
+            return;
+        }
+
+        if let Some(span) = ctx.span(id) {
+            let mut visitor = FieldVisitor::new();
+            values.record(&mut visitor);
+            let fields = visitor.into_fields();
+            if fields.is_empty() {
+                return;
+            }
+
+            let mut extensions = span.extensions_mut();
+            if let Some(cached) = extensions.get_mut::<CachedSpanFields>() {
+                cached.0.extend(fields);
+            } else {
+                extensions.replace(CachedSpanFields(fields));
+            }
         }
     }
 
@@ -1004,6 +1037,15 @@ where
         ctx: Context<'_, Sub>,
     ) {
         self.record_span_context(attrs, id, ctx);
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, Sub>,
+    ) {
+        self.update_span_context(id, values, ctx);
     }
 }
 

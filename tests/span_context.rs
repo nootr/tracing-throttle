@@ -302,3 +302,63 @@ fn test_root_event_ignores_entered_span() {
         "root events share one bucket regardless of the entered span"
     );
 }
+
+#[test]
+fn test_span_record_after_creation_reaches_context() {
+    // The idiomatic pattern: declare the field as Empty and record it once
+    // the value is known (e.g. after authentication).
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(2).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for user in ["alice", "bob"] {
+            let span = info_span!("request", user_id = tracing::field::Empty);
+            let _enter = span.enter();
+            span.record("user_id", user);
+            for _ in 0..3 {
+                tracing::info!("event");
+            }
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        4,
+        "values recorded via Span::record must be part of the span context"
+    );
+}
+
+#[test]
+fn test_span_record_overrides_creation_value() {
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(1).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        let span = info_span!("request", user_id = "anonymous");
+        let _enter = span.enter();
+        for user in [None, Some("alice"), Some("bob")] {
+            if let Some(user) = user {
+                span.record("user_id", user);
+            }
+            tracing::info!("event");
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        3,
+        "each recorded value should open a new bucket"
+    );
+}

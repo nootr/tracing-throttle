@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-09-09
+
+### Thanks
+
+- [@jwalton](https://github.com/jwalton) for reporting [#7](https://github.com/nootr/tracing-throttle/issues/7) and fixing it in [#8](https://github.com/nootr/tracing-throttle/pull/8).
+
+### Fixed
+
+- **Span context without the `Layer`**: `with_span_context_fields()` now works when the throttle is registered only as a `Filter`. Span fields are cached from the `Filter` hooks, so adding it as both filter and layer is no longer required (still supported for backward compatibility). Fixes [#7](https://github.com/nootr/tracing-throttle/issues/7).
+- **Events with an explicit parent**: Span context is derived from the event's own scope instead of the span entered on the current thread. Events with `parent:` are bucketed by their actual parent span, and `parent: None` root events no longer absorb the entered span's context.
+- **`Span::record` values**: Fields declared as `tracing::field::Empty` and filled in later via `Span::record` now reach the cached span context, so those events are no longer collapsed into a single throttle bucket.
+
+### Performance
+
+- **Span cache only when needed**: Span fields are formatted and cached only when the span declares a configured context field, the extensions write lock is skipped for empty maps, and a cache stored by another throttle instance is reused.
+- **Fewer allocations in span lookup**: Configured field names are probed as `&str`, so lookup no longer clones each name per span level per event.
+- **Single field visit per event**: Under the `human-readable` feature, event fields are visited once instead of twice.
+
+### Documentation
+
+- **`Layer` impl marked as compat shim**: The empty `Layer` impl is documented as inert (`.with(rate_limit)` compiles but throttles nothing), the `enabled()` comment is corrected, and the `BEST_PRACTICES` example no longer uses the standalone `.with(layer)` form.
+
 ## [0.4.3] - 2026-07-02
 
 ### Fixed

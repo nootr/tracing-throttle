@@ -658,15 +658,15 @@ where
                 let extensions = span_ref.extensions();
 
                 if let Some(stored_fields) = extensions.get::<CachedSpanFields>() {
-                    for field_name in self.span_context_fields.as_ref() {
-                        // Create an owned Cow since we can't guarantee 'static lifetime from the String
-                        let field_key: Cow<'static, str> = Cow::Owned(field_name.clone());
-                        if let std::collections::btree_map::Entry::Vacant(e) =
-                            context_fields.entry(field_key.clone())
-                        {
-                            if let Some(value) = stored_fields.0.get(&field_key) {
-                                e.insert(value.clone());
-                            }
+                    for field_name in self.span_context_fields.iter() {
+                        // Inner-most span wins: skip fields already collected.
+                        // Lookups go through `Borrow<str>` so nothing is
+                        // allocated unless a value is actually found.
+                        if context_fields.contains_key(field_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(value) = stored_fields.0.get(field_name.as_str()) {
+                            context_fields.insert(Cow::Owned(field_name.clone()), value.clone());
                         }
                     }
                 }

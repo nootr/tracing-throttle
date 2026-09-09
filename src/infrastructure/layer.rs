@@ -970,8 +970,10 @@ where
     Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     fn enabled(&self, _meta: &Metadata<'_>, _cx: &Context<'_, Sub>) -> bool {
-        // Always return true - actual filtering happens in event_enabled
-        // This prevents double-checking in dual-layer setups
+        // Always return true: event filtering happens in event_enabled, and
+        // spans MUST be enabled here or `Filtered` never calls our
+        // on_new_span/on_record hooks, which would silently disable span
+        // context caching.
         true
     }
 
@@ -1049,6 +1051,21 @@ where
     }
 }
 
+/// Inert `Layer` implementation kept for backward compatibility.
+///
+/// Attaching the throttle directly with `.with(rate_limit)` compiles but does
+/// **nothing**: no events are throttled and no span fields are cached. All
+/// behaviour lives in the [`Filter`] implementation, so attach it to the layer
+/// whose output should be throttled:
+///
+/// ```rust,ignore
+/// tracing_subscriber::registry()
+///     .with(tracing_subscriber::fmt::layer().with_filter(rate_limit))
+/// ```
+///
+/// This impl only exists so that older setups which added the throttle as
+/// both a layer and a filter keep compiling; it will be removed in a future
+/// breaking release.
 impl<S, Sub> Layer<Sub> for TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone + 'static,

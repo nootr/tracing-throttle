@@ -609,6 +609,9 @@ where
     _emitter_config: EmitterConfig,
 }
 
+/// Field name/value pairs collected from a span or event.
+type Fields = BTreeMap<Cow<'static, str>, Cow<'static, str>>;
+
 /// Span attributes cached in the span's extensions for span context lookup.
 ///
 /// A newtype so the extension slot cannot collide with another layer that
@@ -762,23 +765,31 @@ where
     /// excluded_fields set. This ensures that field values are included in
     /// event signatures by default, preventing accidental deduplication of
     /// semantically different events.
+    ///
+    /// The event is visited exactly once. The `message` field is returned
+    /// separately (before exclusion is applied) so callers that need it for
+    /// metadata do not have to visit the event again.
     fn extract_event_fields(
         &self,
         event: &tracing::Event<'_>,
-    ) -> BTreeMap<Cow<'static, str>, Cow<'static, str>> {
+    ) -> (Fields, Option<Cow<'static, str>>) {
         let mut visitor = FieldVisitor::new();
         event.record(&mut visitor);
         let all_fields = visitor.into_fields();
 
+        let message = all_fields.get("message").cloned();
+
         // Exclude configured fields (e.g., high-cardinality fields like request_id)
-        if self.excluded_fields.is_empty() {
+        let fields = if self.excluded_fields.is_empty() {
             all_fields
         } else {
             all_fields
                 .into_iter()
                 .filter(|(field_name, _)| !self.excluded_fields.contains(field_name.as_ref()))
                 .collect()
-        }
+        };
+
+        (fields, message)
     }
 
     /// Compute event signature from tracing metadata, span context, and event fields.
@@ -1036,23 +1047,18 @@ where
             return true;
         }
 
-        // Combine span context and event fields
+        // Combine span context and event fields (the event is visited once)
         let mut combined_fields = self.extract_span_context(event, cx);
-        let event_fields = self.extract_event_fields(event);
+        let (event_fields, message) = self.extract_event_fields(event);
         combined_fields.extend(event_fields);
 
         let signature = self.compute_signature(metadata_obj, &combined_fields);
 
         #[cfg(feature = "human-readable")]
         {
-            // Extract message from event for metadata
-            let mut visitor = FieldVisitor::new();
-            event.record(&mut visitor);
-            let all_fields = visitor.into_fields();
-            let message = all_fields
-                .get(&Cow::Borrowed("message"))
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| event.metadata().name().to_string());
+            let message = message
+                .map(Cow::into_owned)
+                .unwrap_or_else(|| metadata_obj.name().to_string());
 
             // Create EventMetadata for this event
             let event_metadata = crate::domain::metadata::EventMetadata::new(
@@ -1067,6 +1073,7 @@ where
 
         #[cfg(not(feature = "human-readable"))]
         {
+            let _ = message;
             self.should_allow(signature)
         }
     }

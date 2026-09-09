@@ -362,3 +362,38 @@ fn test_span_record_overrides_creation_value() {
         "each recorded value should open a new bucket"
     );
 }
+
+#[test]
+fn test_one_throttle_shared_by_two_sinks() {
+    // The same filter attached to two sinks runs on_new_span twice per span;
+    // both sinks must see consistent per-user throttling.
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(2).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let first = MockCaptureLayer::new();
+    let second = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry()
+        .with(first.clone().with_filter(rate_limit.clone()))
+        .with(second.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for user in ["alice", "bob"] {
+            let span = info_span!("request", user_id = tracing::field::Empty);
+            let _enter = span.enter();
+            span.record("user_id", user);
+            for _ in 0..3 {
+                tracing::info!("event");
+            }
+        }
+    });
+
+    // Each sink asks the shared limiter separately, so every event consumes
+    // two units of the per-user budget: the first event per user reaches both
+    // sinks, the rest are suppressed for both. Without correct per-user span
+    // context both users would share one bucket and only one event would pass.
+    assert_eq!(first.count(), 2, "first sink sees one event per user");
+    assert_eq!(second.count(), 2, "second sink sees one event per user");
+}

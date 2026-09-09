@@ -58,8 +58,6 @@ pub enum BuildError {
     EmitterConfig(crate::application::emitter::EmitterConfigError),
 }
 
-struct CachedSpanFields(BTreeMap<Cow<'static, str>, Cow<'static, str>>);
-
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -611,10 +609,31 @@ where
     _emitter_config: EmitterConfig,
 }
 
+/// Span attributes cached in the span's extensions for span context lookup.
+///
+/// A newtype so the extension slot cannot collide with another layer that
+/// stores a bare `BTreeMap`.
+///
+/// Invariant: the cache is **configuration independent**. It always holds all
+/// attributes of the span (never just the configured `span_context_fields`),
+/// because several throttle instances with different configurations may share
+/// the same subscriber and read each other's cache.
+struct CachedSpanFields(BTreeMap<Cow<'static, str>, Cow<'static, str>>);
+
 impl<S> TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone,
 {
+    /// Whether a span declares at least one of the configured context fields.
+    ///
+    /// Spans can only ever carry fields declared in their metadata, so spans
+    /// that declare none of the configured fields never need to be cached.
+    fn declares_context_field(&self, fields: &tracing::field::FieldSet) -> bool {
+        self.span_context_fields
+            .iter()
+            .any(|name| fields.field(name).is_some())
+    }
+
     /// Extract span context fields from the span scope of an event.
     ///
     /// Uses the event's own parent (explicit `parent:` or the contextual
@@ -670,18 +689,33 @@ where
     ) where
         Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
-        if self.span_context_fields.is_empty() {
+        if self.span_context_fields.is_empty()
+            || !self.declares_context_field(attrs.metadata().fields())
+        {
             return;
         }
 
-        if let Some(span) = ctx.span(id) {
-            let mut visitor = FieldVisitor::new();
-            attrs.record(&mut visitor);
-            let fields = visitor.into_fields();
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
 
-            let mut extensions = span.extensions_mut();
-            extensions.replace(CachedSpanFields(fields));
+        // Another throttle instance on the same subscriber (e.g. one filter
+        // cloned onto several sinks) may already have cached this span. The
+        // cache is configuration independent, so reuse it.
+        if span.extensions().get::<CachedSpanFields>().is_some() {
+            return;
         }
+
+        let mut visitor = FieldVisitor::new();
+        attrs.record(&mut visitor);
+        let fields = visitor.into_fields();
+        if fields.is_empty() {
+            // All declared fields were `Empty`; on_record will create the
+            // cache if values arrive later.
+            return;
+        }
+
+        span.extensions_mut().replace(CachedSpanFields(fields));
     }
 
     /// Merge values recorded after span creation (`Span::record`) into the cache.
@@ -696,24 +730,29 @@ where
     ) where
         Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
-        if self.span_context_fields.is_empty() {
+        if self.span_context_fields.is_empty() || values.is_empty() {
             return;
         }
 
-        if let Some(span) = ctx.span(id) {
-            let mut visitor = FieldVisitor::new();
-            values.record(&mut visitor);
-            let fields = visitor.into_fields();
-            if fields.is_empty() {
-                return;
-            }
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        if !self.declares_context_field(span.metadata().fields()) {
+            return;
+        }
 
-            let mut extensions = span.extensions_mut();
-            if let Some(cached) = extensions.get_mut::<CachedSpanFields>() {
-                cached.0.extend(fields);
-            } else {
-                extensions.replace(CachedSpanFields(fields));
-            }
+        let mut visitor = FieldVisitor::new();
+        values.record(&mut visitor);
+        let fields = visitor.into_fields();
+        if fields.is_empty() {
+            return;
+        }
+
+        let mut extensions = span.extensions_mut();
+        if let Some(cached) = extensions.get_mut::<CachedSpanFields>() {
+            cached.0.extend(fields);
+        } else {
+            extensions.replace(CachedSpanFields(fields));
         }
     }
 

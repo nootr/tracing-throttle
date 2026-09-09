@@ -58,6 +58,8 @@ pub enum BuildError {
     EmitterConfig(crate::application::emitter::EmitterConfigError),
 }
 
+struct CachedSpanFields(BTreeMap<Cow<'static, str>, Cow<'static, str>>);
+
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -631,16 +633,14 @@ where
             for span_ref in span.scope() {
                 let extensions = span_ref.extensions();
 
-                if let Some(stored_fields) =
-                    extensions.get::<BTreeMap<Cow<'static, str>, Cow<'static, str>>>()
-                {
+                if let Some(stored_fields) = extensions.get::<CachedSpanFields>() {
                     for field_name in self.span_context_fields.as_ref() {
                         // Create an owned Cow since we can't guarantee 'static lifetime from the String
                         let field_key: Cow<'static, str> = Cow::Owned(field_name.clone());
                         if let std::collections::btree_map::Entry::Vacant(e) =
                             context_fields.entry(field_key.clone())
                         {
-                            if let Some(value) = stored_fields.get(&field_key) {
+                            if let Some(value) = stored_fields.0.get(&field_key) {
                                 e.insert(value.clone());
                             }
                         }
@@ -654,6 +654,29 @@ where
         }
 
         context_fields
+    }
+
+    /// Handle entering a new span.
+    fn record_span_context<Sub>(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, Sub>,
+    ) where
+        Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        if self.span_context_fields.is_empty() {
+            return;
+        }
+
+        if let Some(span) = ctx.span(id) {
+            let mut visitor = FieldVisitor::new();
+            attrs.record(&mut visitor);
+            let fields = visitor.into_fields();
+
+            let mut extensions = span.extensions_mut();
+            extensions.replace(CachedSpanFields(fields));
+        }
     }
 
     /// Extract event fields from an event.
@@ -968,6 +991,15 @@ where
             self.should_allow(signature)
         }
     }
+
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, Sub>,
+    ) {
+        self.record_span_context(attrs, id, ctx);
+    }
 }
 
 impl<S, Sub> Layer<Sub> for TracingRateLimitLayer<S>
@@ -975,25 +1007,6 @@ where
     S: Storage<EventSignature, EventState> + Clone + 'static,
     Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::span::Id,
-        ctx: Context<'_, Sub>,
-    ) {
-        if self.span_context_fields.is_empty() {
-            return;
-        }
-
-        let mut visitor = FieldVisitor::new();
-        attrs.record(&mut visitor);
-        let fields = visitor.into_fields();
-
-        if let Some(span) = ctx.span(id) {
-            let mut extensions = span.extensions_mut();
-            extensions.insert(fields);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1646,5 +1659,60 @@ mod tests {
         );
 
         layer_clone.shutdown().await.expect("shutdown failed");
+    }
+
+    #[cfg(all(feature = "async", feature = "human-readable"))]
+    #[tokio::test]
+    async fn test_filter_only_summary_includes_span_context_fields() {
+        use std::borrow::Cow;
+        use std::sync::Mutex;
+        use std::time::Duration;
+
+        let summaries = Arc::new(Mutex::new(Vec::new()));
+
+        let layer = {
+            let summaries = summaries.clone();
+            TracingRateLimitLayer::builder()
+                .with_policy(Policy::count_based(1).unwrap())
+                .with_active_emission(true)
+                .with_summary_interval(Duration::from_millis(50))
+                .with_span_context_fields(vec!["stream_id".to_string()])
+                .with_summary_formatter(Arc::new(move |summary| {
+                    summaries.lock().unwrap().push(summary.clone());
+                }))
+                .build()
+                .unwrap()
+        };
+
+        let layer_clone = layer.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::fmt::layer().with_filter(layer));
+
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("stream", stream_id = "a");
+            let _enter = span.enter();
+
+            for _ in 0..4 {
+                tracing::info!("foo");
+            }
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        layer_clone.shutdown().await.expect("shutdown failed");
+
+        let summaries = summaries.lock().unwrap();
+        let summary = summaries
+            .iter()
+            .find(|summary| summary.metadata.is_some())
+            .expect("expected a summary with metadata");
+
+        let metadata = summary.metadata.as_ref().unwrap();
+        assert_eq!(
+            metadata
+                .fields
+                .get(&Cow::Borrowed("stream_id"))
+                .map(Cow::as_ref),
+            Some("a")
+        );
     }
 }

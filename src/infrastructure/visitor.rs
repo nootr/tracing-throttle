@@ -5,18 +5,14 @@
 //!
 //! ## Architecture
 //!
-//! The span context rate limiting feature uses a dual-layer pattern:
+//! The span context rate limiting feature records span fields in extensions
+//! and uses those cached fields when computing event signatures.  These get called
+//! from `TracingRateLimitLayer`'s `Filter` implementation:
 //!
-//! 1. **Field Storage Layer**: The first `TracingRateLimitLayer` instance implements
-//!    the `Layer` trait and its `on_new_span` method stores span fields in extensions
-//!    using this `FieldVisitor`.
+//! 1. `on_new_span()` method stores span fields in extensions using this `FieldVisitor`.
 //!
-//! 2. **Filter Layer**: The second `TracingRateLimitLayer` instance (a clone of the first)
-//!    is used as a `Filter` on the capture layer. It extracts fields from span extensions
+//! 2. `event_enabled()` extracts the stored fields, and fields from each event,
 //!    and uses them in signature computation.
-//!
-//! Both layers share the same underlying `RateLimiter` (via `Arc`), so rate limiting
-//! state is consistent across both instances.
 //!
 //! ## Usage
 //!
@@ -27,11 +23,8 @@
 //!     .build()
 //!     .unwrap();
 //!
-//! // Dual layer setup
-//! let rate_limit_filter = rate_limit.clone();
 //! let subscriber = tracing_subscriber::registry()
-//!     .with(rate_limit)  // Stores span fields via on_new_span
-//!     .with(capture.with_filter(rate_limit_filter));  // Filters using those fields
+//!     .with(capture.with_filter(rate_limit));
 //! ```
 
 use std::borrow::Cow;

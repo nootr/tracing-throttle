@@ -240,3 +240,65 @@ fn test_no_span_context_configured() {
         "Without span context, events are still distinguished by source location"
     );
 }
+
+#[test]
+fn test_explicit_parent_span_is_used_for_context() {
+    // Events with an explicit `parent:` must be bucketed by that span's fields,
+    // not by whichever span happens to be entered on the current thread.
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(1).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        let alice = info_span!("request", user_id = "alice");
+        let bob = info_span!("request", user_id = "bob");
+
+        // Alice stays entered the whole time; bob's span is never entered.
+        // A single callsite emits for both so only the parent differs.
+        let _enter = alice.enter();
+        for span in [&alice, &bob] {
+            for _ in 0..3 {
+                tracing::info!(parent: span.id(), "event");
+            }
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        2,
+        "alice and bob should each get their own bucket"
+    );
+}
+
+#[test]
+fn test_root_event_ignores_entered_span() {
+    // `parent: None` makes an event a root; it must not absorb the entered
+    // span's fields.
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(1).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for user in ["alice", "bob"] {
+            let span = info_span!("request", user_id = user);
+            let _enter = span.enter();
+            tracing::info!(parent: None, "event");
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        1,
+        "root events share one bucket regardless of the entered span"
+    );
+}

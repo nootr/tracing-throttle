@@ -615,9 +615,14 @@ impl<S> TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone,
 {
-    /// Extract span context fields from the current span.
+    /// Extract span context fields from the span scope of an event.
+    ///
+    /// Uses the event's own parent (explicit `parent:` or the contextual
+    /// current span) rather than the thread's entered span, so events with an
+    /// explicit parent or `parent: None` are bucketed by the right span.
     fn extract_span_context<Sub>(
         &self,
+        event: &tracing::Event<'_>,
         cx: &Context<'_, Sub>,
     ) -> BTreeMap<Cow<'static, str>, Cow<'static, str>>
     where
@@ -629,8 +634,8 @@ where
 
         let mut context_fields = BTreeMap::new();
 
-        if let Some(span) = cx.lookup_current() {
-            for span_ref in span.scope() {
+        if let Some(scope) = cx.event_scope(event) {
+            for span_ref in scope {
                 let extensions = span_ref.extensions();
 
                 if let Some(stored_fields) = extensions.get::<CachedSpanFields>() {
@@ -958,7 +963,7 @@ where
         }
 
         // Combine span context and event fields
-        let mut combined_fields = self.extract_span_context(cx);
+        let mut combined_fields = self.extract_span_context(event, cx);
         let event_fields = self.extract_event_fields(event);
         combined_fields.extend(event_fields);
 

@@ -58,8 +58,6 @@ pub enum BuildError {
     EmitterConfig(crate::application::emitter::EmitterConfigError),
 }
 
-struct CachedSpanFields(BTreeMap<Cow<'static, str>, Cow<'static, str>>);
-
 impl std::fmt::Display for BuildError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -611,13 +609,42 @@ where
     _emitter_config: EmitterConfig,
 }
 
+/// Field name/value pairs collected from a span or event.
+type Fields = BTreeMap<Cow<'static, str>, Cow<'static, str>>;
+
+/// Span attributes cached in the span's extensions for span context lookup.
+///
+/// A newtype so the extension slot cannot collide with another layer that
+/// stores a bare `BTreeMap`.
+///
+/// Invariant: the cache is **configuration independent**. It always holds all
+/// attributes of the span (never just the configured `span_context_fields`),
+/// because several throttle instances with different configurations may share
+/// the same subscriber and read each other's cache.
+struct CachedSpanFields(BTreeMap<Cow<'static, str>, Cow<'static, str>>);
+
 impl<S> TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone,
 {
-    /// Extract span context fields from the current span.
+    /// Whether a span declares at least one of the configured context fields.
+    ///
+    /// Spans can only ever carry fields declared in their metadata, so spans
+    /// that declare none of the configured fields never need to be cached.
+    fn declares_context_field(&self, fields: &tracing::field::FieldSet) -> bool {
+        self.span_context_fields
+            .iter()
+            .any(|name| fields.field(name).is_some())
+    }
+
+    /// Extract span context fields from the span scope of an event.
+    ///
+    /// Uses the event's own parent (explicit `parent:` or the contextual
+    /// current span) rather than the thread's entered span, so events with an
+    /// explicit parent or `parent: None` are bucketed by the right span.
     fn extract_span_context<Sub>(
         &self,
+        event: &tracing::Event<'_>,
         cx: &Context<'_, Sub>,
     ) -> BTreeMap<Cow<'static, str>, Cow<'static, str>>
     where
@@ -629,20 +656,20 @@ where
 
         let mut context_fields = BTreeMap::new();
 
-        if let Some(span) = cx.lookup_current() {
-            for span_ref in span.scope() {
+        if let Some(scope) = cx.event_scope(event) {
+            for span_ref in scope {
                 let extensions = span_ref.extensions();
 
                 if let Some(stored_fields) = extensions.get::<CachedSpanFields>() {
-                    for field_name in self.span_context_fields.as_ref() {
-                        // Create an owned Cow since we can't guarantee 'static lifetime from the String
-                        let field_key: Cow<'static, str> = Cow::Owned(field_name.clone());
-                        if let std::collections::btree_map::Entry::Vacant(e) =
-                            context_fields.entry(field_key.clone())
-                        {
-                            if let Some(value) = stored_fields.0.get(&field_key) {
-                                e.insert(value.clone());
-                            }
+                    for field_name in self.span_context_fields.iter() {
+                        // Inner-most span wins: skip fields already collected.
+                        // Lookups go through `Borrow<str>` so nothing is
+                        // allocated unless a value is actually found.
+                        if context_fields.contains_key(field_name.as_str()) {
+                            continue;
+                        }
+                        if let Some(value) = stored_fields.0.get(field_name.as_str()) {
+                            context_fields.insert(Cow::Owned(field_name.clone()), value.clone());
                         }
                     }
                 }
@@ -656,7 +683,7 @@ where
         context_fields
     }
 
-    /// Handle entering a new span.
+    /// Cache span attributes on span creation.
     fn record_span_context<Sub>(
         &self,
         attrs: &tracing::span::Attributes<'_>,
@@ -665,16 +692,69 @@ where
     ) where
         Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
-        if self.span_context_fields.is_empty() {
+        if self.span_context_fields.is_empty()
+            || !self.declares_context_field(attrs.metadata().fields())
+        {
             return;
         }
 
-        if let Some(span) = ctx.span(id) {
-            let mut visitor = FieldVisitor::new();
-            attrs.record(&mut visitor);
-            let fields = visitor.into_fields();
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
 
-            let mut extensions = span.extensions_mut();
+        // Another throttle instance on the same subscriber (e.g. one filter
+        // cloned onto several sinks) may already have cached this span. The
+        // cache is configuration independent, so reuse it.
+        if span.extensions().get::<CachedSpanFields>().is_some() {
+            return;
+        }
+
+        let mut visitor = FieldVisitor::new();
+        attrs.record(&mut visitor);
+        let fields = visitor.into_fields();
+        if fields.is_empty() {
+            // All declared fields were `Empty`; on_record will create the
+            // cache if values arrive later.
+            return;
+        }
+
+        span.extensions_mut().replace(CachedSpanFields(fields));
+    }
+
+    /// Merge values recorded after span creation (`Span::record`) into the cache.
+    ///
+    /// Fields declared as `tracing::field::Empty` are not visited on creation,
+    /// so this is the only way values recorded later reach the span context.
+    fn update_span_context<Sub>(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, Sub>,
+    ) where
+        Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
+    {
+        if self.span_context_fields.is_empty() || values.is_empty() {
+            return;
+        }
+
+        let Some(span) = ctx.span(id) else {
+            return;
+        };
+        if !self.declares_context_field(span.metadata().fields()) {
+            return;
+        }
+
+        let mut visitor = FieldVisitor::new();
+        values.record(&mut visitor);
+        let fields = visitor.into_fields();
+        if fields.is_empty() {
+            return;
+        }
+
+        let mut extensions = span.extensions_mut();
+        if let Some(cached) = extensions.get_mut::<CachedSpanFields>() {
+            cached.0.extend(fields);
+        } else {
             extensions.replace(CachedSpanFields(fields));
         }
     }
@@ -685,23 +765,31 @@ where
     /// excluded_fields set. This ensures that field values are included in
     /// event signatures by default, preventing accidental deduplication of
     /// semantically different events.
+    ///
+    /// The event is visited exactly once. The `message` field is returned
+    /// separately (before exclusion is applied) so callers that need it for
+    /// metadata do not have to visit the event again.
     fn extract_event_fields(
         &self,
         event: &tracing::Event<'_>,
-    ) -> BTreeMap<Cow<'static, str>, Cow<'static, str>> {
+    ) -> (Fields, Option<Cow<'static, str>>) {
         let mut visitor = FieldVisitor::new();
         event.record(&mut visitor);
         let all_fields = visitor.into_fields();
 
+        let message = all_fields.get("message").cloned();
+
         // Exclude configured fields (e.g., high-cardinality fields like request_id)
-        if self.excluded_fields.is_empty() {
+        let fields = if self.excluded_fields.is_empty() {
             all_fields
         } else {
             all_fields
                 .into_iter()
                 .filter(|(field_name, _)| !self.excluded_fields.contains(field_name.as_ref()))
                 .collect()
-        }
+        };
+
+        (fields, message)
     }
 
     /// Compute event signature from tracing metadata, span context, and event fields.
@@ -932,8 +1020,10 @@ where
     Sub: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     fn enabled(&self, _meta: &Metadata<'_>, _cx: &Context<'_, Sub>) -> bool {
-        // Always return true - actual filtering happens in event_enabled
-        // This prevents double-checking in dual-layer setups
+        // Always return true: event filtering happens in event_enabled, and
+        // spans MUST be enabled here or `Filtered` never calls our
+        // on_new_span/on_record hooks, which would silently disable span
+        // context caching.
         true
     }
 
@@ -957,23 +1047,18 @@ where
             return true;
         }
 
-        // Combine span context and event fields
-        let mut combined_fields = self.extract_span_context(cx);
-        let event_fields = self.extract_event_fields(event);
+        // Combine span context and event fields (the event is visited once)
+        let mut combined_fields = self.extract_span_context(event, cx);
+        let (event_fields, message) = self.extract_event_fields(event);
         combined_fields.extend(event_fields);
 
         let signature = self.compute_signature(metadata_obj, &combined_fields);
 
         #[cfg(feature = "human-readable")]
         {
-            // Extract message from event for metadata
-            let mut visitor = FieldVisitor::new();
-            event.record(&mut visitor);
-            let all_fields = visitor.into_fields();
-            let message = all_fields
-                .get(&Cow::Borrowed("message"))
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| event.metadata().name().to_string());
+            let message = message
+                .map(Cow::into_owned)
+                .unwrap_or_else(|| metadata_obj.name().to_string());
 
             // Create EventMetadata for this event
             let event_metadata = crate::domain::metadata::EventMetadata::new(
@@ -988,6 +1073,7 @@ where
 
         #[cfg(not(feature = "human-readable"))]
         {
+            let _ = message;
             self.should_allow(signature)
         }
     }
@@ -1000,8 +1086,32 @@ where
     ) {
         self.record_span_context(attrs, id, ctx);
     }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, Sub>,
+    ) {
+        self.update_span_context(id, values, ctx);
+    }
 }
 
+/// Inert `Layer` implementation kept for backward compatibility.
+///
+/// Attaching the throttle directly with `.with(rate_limit)` compiles but does
+/// **nothing**: no events are throttled and no span fields are cached. All
+/// behaviour lives in the [`Filter`] implementation, so attach it to the layer
+/// whose output should be throttled:
+///
+/// ```rust,ignore
+/// tracing_subscriber::registry()
+///     .with(tracing_subscriber::fmt::layer().with_filter(rate_limit))
+/// ```
+///
+/// This impl only exists so that older setups which added the throttle as
+/// both a layer and a filter keep compiling; it will be removed in a future
+/// breaking release.
 impl<S, Sub> Layer<Sub> for TracingRateLimitLayer<S>
 where
     S: Storage<EventSignature, EventState> + Clone + 'static,

@@ -328,6 +328,8 @@ error!(retry_count = retry_count, user_id = user_id, "Retry limit exceeded");
 ```rust
 #[cfg(test)]
 mod tests {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::Layer;
     use tracing_throttle::*;
 
     #[test]
@@ -341,7 +343,7 @@ mod tests {
         let metrics = layer.metrics().clone();
 
         tracing::subscriber::with_default(
-            tracing_subscriber::registry().with(layer),
+            tracing_subscriber::registry().with(tracing_subscriber::fmt::layer().with_filter(layer)),
             || {
                 // User 123: should allow 2
                 for _ in 0..5 {

@@ -240,3 +240,160 @@ fn test_no_span_context_configured() {
         "Without span context, events are still distinguished by source location"
     );
 }
+
+#[test]
+fn test_explicit_parent_span_is_used_for_context() {
+    // Events with an explicit `parent:` must be bucketed by that span's fields,
+    // not by whichever span happens to be entered on the current thread.
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(1).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        let alice = info_span!("request", user_id = "alice");
+        let bob = info_span!("request", user_id = "bob");
+
+        // Alice stays entered the whole time; bob's span is never entered.
+        // A single callsite emits for both so only the parent differs.
+        let _enter = alice.enter();
+        for span in [&alice, &bob] {
+            for _ in 0..3 {
+                tracing::info!(parent: span.id(), "event");
+            }
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        2,
+        "alice and bob should each get their own bucket"
+    );
+}
+
+#[test]
+fn test_root_event_ignores_entered_span() {
+    // `parent: None` makes an event a root; it must not absorb the entered
+    // span's fields.
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(1).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for user in ["alice", "bob"] {
+            let span = info_span!("request", user_id = user);
+            let _enter = span.enter();
+            tracing::info!(parent: None, "event");
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        1,
+        "root events share one bucket regardless of the entered span"
+    );
+}
+
+#[test]
+fn test_span_record_after_creation_reaches_context() {
+    // The idiomatic pattern: declare the field as Empty and record it once
+    // the value is known (e.g. after authentication).
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(2).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for user in ["alice", "bob"] {
+            let span = info_span!("request", user_id = tracing::field::Empty);
+            let _enter = span.enter();
+            span.record("user_id", user);
+            for _ in 0..3 {
+                tracing::info!("event");
+            }
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        4,
+        "values recorded via Span::record must be part of the span context"
+    );
+}
+
+#[test]
+fn test_span_record_overrides_creation_value() {
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(1).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let capture = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry().with(capture.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        let span = info_span!("request", user_id = "anonymous");
+        let _enter = span.enter();
+        for user in [None, Some("alice"), Some("bob")] {
+            if let Some(user) = user {
+                span.record("user_id", user);
+            }
+            tracing::info!("event");
+        }
+    });
+
+    assert_eq!(
+        capture.count(),
+        3,
+        "each recorded value should open a new bucket"
+    );
+}
+
+#[test]
+fn test_one_throttle_shared_by_two_sinks() {
+    // The same filter attached to two sinks runs on_new_span twice per span;
+    // both sinks must see consistent per-user throttling.
+    let rate_limit = TracingRateLimitLayer::builder()
+        .with_policy(Policy::count_based(2).unwrap())
+        .with_span_context_fields(vec!["user_id".to_string()])
+        .build()
+        .unwrap();
+
+    let first = MockCaptureLayer::new();
+    let second = MockCaptureLayer::new();
+    let subscriber = tracing_subscriber::registry()
+        .with(first.clone().with_filter(rate_limit.clone()))
+        .with(second.clone().with_filter(rate_limit));
+
+    tracing::subscriber::with_default(subscriber, || {
+        for user in ["alice", "bob"] {
+            let span = info_span!("request", user_id = tracing::field::Empty);
+            let _enter = span.enter();
+            span.record("user_id", user);
+            for _ in 0..3 {
+                tracing::info!("event");
+            }
+        }
+    });
+
+    // Each sink asks the shared limiter separately, so every event consumes
+    // two units of the per-user budget: the first event per user reaches both
+    // sinks, the rest are suppressed for both. Without correct per-user span
+    // context both users would share one bucket and only one event would pass.
+    assert_eq!(first.count(), 2, "first sink sees one event per user");
+    assert_eq!(second.count(), 2, "second sink sees one event per user");
+}
